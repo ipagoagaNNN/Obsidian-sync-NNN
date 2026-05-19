@@ -5,17 +5,17 @@ Version: **1.1.0** | Desktop only (Windows / macOS) | See ADR-008 for mobile pla
 
 ---
 
-## What to share with users
+## Verify your download
 
-Send each user a zip containing these 3 files (everything else stays in the repo):
+Make sure the zip contains these files before running the installer:
 
 ```
-nnn-hf-sync/
-  main.js               ← built plugin bundle
-  manifest.json         ← plugin metadata
-  install-windows.bat   ← Windows installer
-  install-macos.sh      ← macOS installer
-  README-user.md        ← this file (optional, for context)
+nnn-hf-sync-v1.1.0/
+  main.js
+  manifest.json
+  install-windows.bat
+  install-macos.sh
+  README-user.md
 ```
 
 ---
