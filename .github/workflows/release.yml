@@ -1,0 +1,78 @@
+# Automated plugin release.
+#
+# Triggers on any tag matching v* (e.g. v1.2.0). For each tagged version:
+#   1. checkout the repo
+#   2. install Node + npm dependencies for obsidian-plugin/
+#   3. build the plugin (esbuild → main.js)
+#   4. cross-check the git tag matches manifest.json's version field
+#   5. compute SHA256 sums for main.js + manifest.json (integrity for Layer 1
+#      defenses in install-windows.ps1 / install-macos.sh)
+#   6. publish a GitHub Release with main.js, manifest.json, SHA256SUMS
+#      attached as downloadable assets
+#
+# Documented in docs/decisions/2026-05-22-adr-009-plugin-distribution.md.
+
+name: Release plugin
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write  # needed by softprops/action-gh-release to create the release
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: obsidian-plugin/package-lock.json
+
+      - name: Install dependencies
+        working-directory: obsidian-plugin
+        run: npm ci
+
+      - name: Build plugin
+        working-directory: obsidian-plugin
+        run: npm run build
+
+      - name: Verify tag matches manifest.json version
+        # Refuses to publish if a v1.3.0 tag is pushed but manifest.json still
+        # says 1.2.0 — catches the mistake of forgetting to bump the manifest.
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          MANIFEST=$(node -p "require('./obsidian-plugin/manifest.json').version")
+          echo "Tag version    : $TAG"
+          echo "Manifest version: $MANIFEST"
+          if [ "$TAG" != "$MANIFEST" ]; then
+            echo "::error::Tag $TAG does not match manifest.json version $MANIFEST"
+            exit 1
+          fi
+
+      - name: Generate SHA256SUMS
+        # sha256sum output format is GNU coreutils:  <hex>  <filename>
+        # Two spaces between hash and filename — the installer scripts split
+        # on whitespace so either separator works.
+        working-directory: obsidian-plugin
+        run: |
+          sha256sum main.js manifest.json > SHA256SUMS
+          echo "=== SHA256SUMS ==="
+          cat SHA256SUMS
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            obsidian-plugin/main.js
+            obsidian-plugin/manifest.json
+            obsidian-plugin/SHA256SUMS
+          generate_release_notes: true
+          fail_on_unmatched_files: true

@@ -30,74 +30,66 @@ NNN-HF-Obsidian/
 
 ---
 
-## Plugin installation (local, manual)
+## Plugin installation
 
-The **NNN HF Sync** plugin (`nnn-hf-sync`) is not in the Obsidian Community Plugins registry — it must be installed manually into your vault's local plugins folder.
+The **NNN HF Sync** plugin (`nnn-hf-sync`) is distributed as signed-integrity GitHub Releases. The installer scripts auto-download the latest version, verify SHA256 hashes against the published `SHA256SUMS`, and install into the Obsidian vault you choose. **Re-running the installer = updating.**
 
-### Files required
-
-From `my-nnn-hf-obsidian/obsidian-plugin/`:
-
-| File | Required |
-|---|---|
-| `main.js` | ✅ Yes |
-| `manifest.json` | ✅ Yes |
-| `styles.css` | Only if present |
-
----
+Threat model and integrity defenses are documented in [`docs/decisions/2026-05-22-adr-009-plugin-distribution.md`](docs/decisions/2026-05-22-adr-009-plugin-distribution.md).
 
 ### Windows
 
-1. Open **File Explorer** and navigate to your vault root folder.
-2. Enable hidden files: **View → Show → Hidden items**.
-3. Open the folder `.obsidian\plugins\` inside your vault.
-4. Create a new folder named exactly `nnn-hf-sync`.
-5. Copy `main.js` and `manifest.json` into that new folder.
-6. Restart Obsidian, or go to **Settings → Community plugins → Reload plugins**.
-7. Enable **NNN HF Sync** under **Settings → Community plugins → Installed plugins**.
+1. Go to **[Releases](https://github.com/ipagoagaNNN/Obsidian-sync-NNN/releases/latest)** and download `install-windows.bat` and `install-windows.ps1` (both files).
+2. Put them in the same folder.
+3. Double-click `install-windows.bat`. The installer will:
+   - Detect your Obsidian vaults from `obsidian.json`.
+   - Let you pick one (auto-selects if only one exists).
+   - Download `main.js`, `manifest.json`, and `SHA256SUMS` from the latest release.
+   - Verify SHA256 hashes against the published values — aborts if any file is tampered.
+   - Install into `<vault>/.obsidian/plugins/nnn-hf-sync/` and enable in `community-plugins.json`.
+4. Reload Obsidian (`Ctrl+P` → "Reload app without saving") and configure the plugin (see below).
 
-> **PowerShell shortcut** (run from the `obsidian-plugin/` directory):
-> ```powershell
-> $vault = "C:\path\to\your\vault"
-> $dest  = "$vault\.obsidian\plugins\nnn-hf-sync"
-> New-Item -ItemType Directory -Force $dest
-> Copy-Item main.js, manifest.json -Destination $dest
-> ```
-
----
+> **Updating:** Just re-run `install-windows.bat`. It always pulls the latest release.
 
 ### macOS
 
-1. Open **Finder** and navigate to your vault root folder.
-2. Press **⌘ Shift .** to toggle hidden files visible.
-3. Open the folder `.obsidian/plugins/` inside your vault.
-4. Create a new folder named exactly `nnn-hf-sync`.
-5. Copy `main.js` and `manifest.json` into that new folder.
-6. Restart Obsidian, or go to **Settings → Community plugins → Reload plugins**.
-7. Enable **NNN HF Sync** under **Settings → Community plugins → Installed plugins**.
+1. Go to **[Releases](https://github.com/ipagoagaNNN/Obsidian-sync-NNN/releases/latest)** and download `install-macos.sh`.
+2. Open Terminal, `cd` into the folder containing the file, and run:
+   ```bash
+   bash install-macos.sh
+   ```
+3. The installer will detect vaults, pick one (auto if only one), download + verify hashes, then install.
+4. Reload Obsidian and configure (see below).
 
-> **Terminal shortcut** (run from the `obsidian-plugin/` directory):
+> **First-time install on macOS:** Gatekeeper may quarantine the downloaded file. If `bash install-macos.sh` reports "Operation not permitted", clear the quarantine flag with:
 > ```bash
-> VAULT="/path/to/your/vault"
-> DEST="$VAULT/.obsidian/plugins/nnn-hf-sync"
-> mkdir -p "$DEST"
-> cp main.js manifest.json "$DEST/"
+> xattr -d com.apple.quarantine install-macos.sh
 > ```
 
----
+> **Updating:** Re-run `bash install-macos.sh`.
 
 ### First-run configuration
 
-After enabling the plugin, open **Settings → NNN HF Sync** and fill in:
+After the installer reports success, reload Obsidian and open **Settings → Community plugins → NNN HF Sync → Options**:
 
 | Setting | Value |
 |---|---|
-| **Auth server URL** | Your `obsidian-sync` HF Space URL (e.g. `https://yourname-obsidian-sync.hf.space`) |
+| **Space URL** | `https://ipagoaga-obsidian-sync.hf.space` |
 | **Username** | Your auth-server username |
-| **Password** | Your auth-server password |
-| **Doc ID** | Shared document identifier (e.g. `main`) |
+| **Password** | Your password (or temp password if first login — a modal will prompt you to set a permanent one) |
+| **Document ID** | Vault identifier (e.g. `nnn-vault`, alphanumeric + hyphens, no slashes) |
 
-> The plugin will request a y-sweet client token from the auth server on startup and begin syncing automatically.
+Click **Connect**. Status bar should show 🟡 → 🟢 within a few seconds. The plugin will pull the shared vault state and create any missing files locally.
+
+### What the installer protects against
+
+| Threat | Mitigation |
+|---|---|
+| Tampering in transit (CDN, ISP, hotel wifi) | HTTPS + SHA256 hash check |
+| Corrupted / partial download | SHA256 hash check |
+| Typo-squatted repo URL | Repo URL hardcoded in installer source |
+| Rollback to a known-vulnerable version | `$MinVersion` floor pinned in installer |
+
+Higher-tier defenses against a fully compromised GitHub account (GPG signing of `SHA256SUMS`) are deferred — see ADR-009.
 
 ---
 

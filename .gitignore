@@ -1,0 +1,51 @@
+# ── Go binaries ───────────────────────────────────────────────────────────────
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+sync/auth-server/obsidian-auth
+sync/auth-server/obsidian-auth.exe
+
+# Go build cache / test artifacts
+*.test
+*.out
+vendor/
+
+# ── Environment / secrets ─────────────────────────────────────────────────────
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+
+# ── Neon / DB ─────────────────────────────────────────────────────────────────
+# seed.sql is safe (hash already applied and removed), but block any local dumps
+*.dump
+*.sql.bak
+
+# ── OS artifacts ──────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── Editor / IDE ──────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ── Docker ────────────────────────────────────────────────────────────────────
+.docker/
+
+# ── Node / npm ────────────────────────────────────────────────────────────────
+# obsidian-plugin/ is bundled via esbuild — node_modules is local-only.
+# package-lock.json IS committed (required by `npm ci` in .github/workflows/release.yml).
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# ── Build artifacts in plugin dir (release workflow regenerates) ──────────────
+obsidian-plugin/SHA256SUMS
