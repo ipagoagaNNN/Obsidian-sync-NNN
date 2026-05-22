@@ -70,9 +70,16 @@ jobs:
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          # Plugin artifacts AND installer scripts are attached to every
+          # release so the release page is the entire user-facing surface:
+          # end users land on /releases/latest, grab the two installer files
+          # for their platform, and run them — no need to navigate the repo.
           files: |
             obsidian-plugin/main.js
             obsidian-plugin/manifest.json
             obsidian-plugin/SHA256SUMS
+            obsidian-plugin/install-windows.bat
+            obsidian-plugin/install-windows.ps1
+            obsidian-plugin/install-macos.sh
           generate_release_notes: true
           fail_on_unmatched_files: true

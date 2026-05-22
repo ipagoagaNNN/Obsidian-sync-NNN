@@ -32,40 +32,59 @@ NNN-HF-Obsidian/
 
 ## Plugin installation
 
-The **NNN HF Sync** plugin (`nnn-hf-sync`) is distributed as signed-integrity GitHub Releases. The installer scripts auto-download the latest version, verify SHA256 hashes against the published `SHA256SUMS`, and install into the Obsidian vault you choose. **Re-running the installer = updating.**
+The **NNN HF Sync** plugin (`nnn-hf-sync`) is distributed as **integrity-verified GitHub Releases**. Each release page is the single source of truth — installers and plugin artifacts live side by side. The installer auto-downloads the latest plugin, verifies every file against the published SHA256 hashes, and installs into the Obsidian vault you choose. **Re-running the installer = updating.**
 
 Threat model and integrity defenses are documented in [`docs/decisions/2026-05-22-adr-009-plugin-distribution.md`](docs/decisions/2026-05-22-adr-009-plugin-distribution.md).
 
+### What's on each release page
+
+Visit **<https://github.com/ipagoagaNNN/Obsidian-sync-NNN/releases/latest>**. You will see six assets attached to the latest release:
+
+| File | Who downloads it | Purpose |
+|---|---|---|
+| `install-windows.bat` | Windows users | Double-click shim that launches the PowerShell installer |
+| `install-windows.ps1` | Windows users | The actual installer logic |
+| `install-macos.sh` | macOS users | bash installer (curl + shasum + python3) |
+| `main.js` | (the installer downloads this) | Plugin code bundle |
+| `manifest.json` | (the installer downloads this) | Plugin metadata |
+| `SHA256SUMS` | (the installer downloads this) | Hash manifest used by the installer to verify integrity |
+
+End users only ever click the two installer files for their platform. The installer takes care of the rest.
+
 ### Windows
 
-1. Go to **[Releases](https://github.com/ipagoagaNNN/Obsidian-sync-NNN/releases/latest)** and download `install-windows.bat` and `install-windows.ps1` (both files).
-2. Put them in the same folder.
+1. Open the **[latest release page](https://github.com/ipagoagaNNN/Obsidian-sync-NNN/releases/latest)**.
+2. Under **Assets**, download both `install-windows.bat` and `install-windows.ps1` into the same folder (e.g. `Downloads\`).
 3. Double-click `install-windows.bat`. The installer will:
-   - Detect your Obsidian vaults from `obsidian.json`.
+   - Detect your Obsidian vaults from `%APPDATA%\obsidian\obsidian.json`.
    - Let you pick one (auto-selects if only one exists).
-   - Download `main.js`, `manifest.json`, and `SHA256SUMS` from the latest release.
-   - Verify SHA256 hashes against the published values — aborts if any file is tampered.
-   - Install into `<vault>/.obsidian/plugins/nnn-hf-sync/` and enable in `community-plugins.json`.
+   - Download `main.js`, `manifest.json`, and `SHA256SUMS` directly from the same release page over HTTPS.
+   - Verify each file's SHA256 against the published manifest — aborts cleanly if anything fails to match.
+   - Cross-check that `manifest.json`'s `version` field matches the GitHub Release tag.
+   - Refuse to install any version below the installer's pinned `$MinVersion` (rollback protection).
+   - Copy the plugin into `<vault>\.obsidian\plugins\nnn-hf-sync\` and enable it in `community-plugins.json`.
 4. Reload Obsidian (`Ctrl+P` → "Reload app without saving") and configure the plugin (see below).
 
-> **Updating:** Just re-run `install-windows.bat`. It always pulls the latest release.
+> **Updating:** just re-run `install-windows.bat`. It always pulls the latest release. You can leave the two installer files in `Downloads\` and re-use them.
 
 ### macOS
 
-1. Go to **[Releases](https://github.com/ipagoagaNNN/Obsidian-sync-NNN/releases/latest)** and download `install-macos.sh`.
-2. Open Terminal, `cd` into the folder containing the file, and run:
+1. Open the **[latest release page](https://github.com/ipagoagaNNN/Obsidian-sync-NNN/releases/latest)**.
+2. Under **Assets**, download `install-macos.sh`.
+3. Open Terminal, `cd` into the folder containing the file, and run:
    ```bash
    bash install-macos.sh
    ```
-3. The installer will detect vaults, pick one (auto if only one), download + verify hashes, then install.
-4. Reload Obsidian and configure (see below).
+4. The installer will detect vaults from `~/Library/Application Support/obsidian/obsidian.json`, let you pick one, download + verify the plugin from the same release page, then install.
+5. Reload Obsidian and configure (see below).
 
-> **First-time install on macOS:** Gatekeeper may quarantine the downloaded file. If `bash install-macos.sh` reports "Operation not permitted", clear the quarantine flag with:
+> **First time on macOS:** Gatekeeper may quarantine the downloaded script. If `bash install-macos.sh` reports *"Operation not permitted"* or refuses to run, clear the quarantine flag with:
 > ```bash
 > xattr -d com.apple.quarantine install-macos.sh
 > ```
+> Then re-run.
 
-> **Updating:** Re-run `bash install-macos.sh`.
+> **Updating:** re-run `bash install-macos.sh` — it pulls the latest release every time.
 
 ### First-run configuration
 
@@ -76,9 +95,9 @@ After the installer reports success, reload Obsidian and open **Settings → Com
 | **Space URL** | `https://ipagoaga-obsidian-sync.hf.space` |
 | **Username** | Your auth-server username |
 | **Password** | Your password (or temp password if first login — a modal will prompt you to set a permanent one) |
-| **Document ID** | Vault identifier (e.g. `nnn-vault`, alphanumeric + hyphens, no slashes) |
+| **Document ID** | Shared vault identifier (e.g. `nnn-vault`, alphanumeric + hyphens, no slashes) |
 
-Click **Connect**. Status bar should show 🟡 → 🟢 within a few seconds. The plugin will pull the shared vault state and create any missing files locally.
+Click **Connect**. Status bar should show 🟡 → 🟢 within a few seconds. The plugin will pull the shared vault state and create any missing files locally — your vault becomes a live mirror of the shared workspace.
 
 ### What the installer protects against
 
@@ -86,10 +105,11 @@ Click **Connect**. Status bar should show 🟡 → 🟢 within a few seconds. Th
 |---|---|
 | Tampering in transit (CDN, ISP, hotel wifi) | HTTPS + SHA256 hash check |
 | Corrupted / partial download | SHA256 hash check |
-| Typo-squatted repo URL | Repo URL hardcoded in installer source |
+| Typo-squatted repo URL | Repo owner + name hardcoded in installer source |
 | Rollback to a known-vulnerable version | `$MinVersion` floor pinned in installer |
+| Asset shuffling between tag and build | manifest.json version cross-checked against the GitHub Release tag |
 
-Higher-tier defenses against a fully compromised GitHub account (GPG signing of `SHA256SUMS`) are deferred — see ADR-009.
+Higher-tier defenses against a fully compromised GitHub account (GPG signing of `SHA256SUMS`) are deferred to Phase 9b — see ADR-009.
 
 ---
 
@@ -97,9 +117,12 @@ Higher-tier defenses against a fully compromised GitHub account (GPG signing of 
 
 - **Phase 1** ✅ Accounts & prerequisites (Neon, HF Spaces, secrets)
 - **Phase 2** ✅ Headscale Space — deployed `obsidian-headscale`
-- **Phase 3** ✅ y-sweet + Go auth server Space — deployed `obsidian-sync`, auth working, 200 confirmed
-- **Phase 4** 🔄 Obsidian plugin — custom TypeScript plugin in `obsidian-plugin/`
-- **Phase 5** ⬜ R2 storage — configure Cloudflare R2 for y-sweet persistence
+- **Phase 3** ✅ y-sweet + Go auth server Space — deployed `obsidian-sync`, auth + ACL + admin UI live
+- **Phase 4** ✅ Obsidian plugin — vault sync (4c) + live co-editing (4d) shipped in v1.2.0
+- **Phase 5** ✅ Cloudflare R2 — y-sweet persists snapshots; cross-vault sync verified
+- **Phase 7** ✅ Admin Console expansion + ACL enforcement
+- **Phase 8** 🔄 Observability & hardening (UptimeRobot, structured logs, Resend email)
+- **Phase 9** 🔄 Distribution — installer scripts shipped (9a); GPG signing deferred (9b)
 
 ## HF Space secrets
 
