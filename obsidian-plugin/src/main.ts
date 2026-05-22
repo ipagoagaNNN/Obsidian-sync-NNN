@@ -55,7 +55,18 @@ import * as Y from 'yjs'
 import { YSweetProvider } from '@y-sweet/client'
 import type { ClientToken } from '@y-sweet/sdk'
 
-const PLUGIN_VERSION = '1.2.0'
+const PLUGIN_VERSION = '1.3.0'
+
+// ── ACL types (mirrors server's pathACL struct in types.go) ───────────────────
+
+/** Server-side ACL row. permission is "read" | "write" | "none" (raw DB value). */
+interface PathACL {
+  path: string
+  permission: 'read' | 'write' | 'none'
+}
+
+/** Effective per-file permission derived from pathAcls + user role. */
+type Permission = 'write' | 'read-only' | 'none'
 
 // ── Settings ──────────────────────────────────────────────────────────────────
 
@@ -105,6 +116,62 @@ async function ensureParentDirs(vault: Vault, filePath: string): Promise<void> {
       try { await vault.createFolder(dir) } catch { /* already exists — race */ }
     }
   }
+}
+
+// ── ACL helpers ───────────────────────────────────────────────────────────────
+
+/**
+ * Glob match implementing Go's `path.Match` semantics so the plugin's
+ * client-side enforcement agrees with the server's `resolveEffectivePermission`.
+ *
+ * Supported:
+ *   *        any sequence of non-separator characters
+ *   ?        single non-separator character
+ *   literal  exact character match
+ *
+ * NOT supported (matches the server's choice):
+ *   **       recursive directory wildcard
+ *   [chars]  character class
+ *
+ * If the pattern contains a literal regex metacharacter, it is escaped before
+ * the glob → regex conversion so it cannot inject regex syntax.
+ */
+function globMatch(pattern: string, name: string): boolean {
+  const regex = '^' + pattern
+    .replace(/[.+^${}()|[\]\\]/g, '\\$&')  // escape regex specials
+    .replace(/\*/g, '[^/]*')                // * → [^/]*
+    .replace(/\?/g, '[^/]')                 // ? → [^/]
+    + '$'
+  try { return new RegExp(regex).test(name) }
+  catch { return false }
+}
+
+/** Role default permission — mirrors server's roleDefault() in handlers_token.go. */
+function roleDefaultPerm(role: string): Permission {
+  if (role === 'viewer') return 'read-only'
+  return 'write' // admin and editor default to full
+}
+
+/**
+ * Compute the effective permission for a file path given the user's role
+ * and the path ACLs received from the /token response.
+ *
+ * Server returns ACLs already sorted with user-specific entries first,
+ * then role-specific entries (see fetchACLs SQL: ORDER BY user_id NOT NULL DESC).
+ * First glob match wins. Falls back to the role default when nothing matches.
+ *
+ * Permission string mapping: DB "write" → "write", "read" → "read-only",
+ * "none" → "none".
+ */
+function effectivePermission(role: string, acls: PathACL[], path: string): Permission {
+  for (const acl of acls) {
+    if (globMatch(acl.path, path)) {
+      if (acl.permission === 'write') return 'write'
+      if (acl.permission === 'read')  return 'read-only'
+      if (acl.permission === 'none')  return 'none'
+    }
+  }
+  return roleDefaultPerm(role)
 }
 
 // ── Password-change modal ─────────────────────────────────────────────────────
@@ -258,11 +325,21 @@ function logout(settings: NNNSyncSettings): void {
   }).catch(() => { /* best-effort */ })
 }
 
+/**
+ * /token result shape — includes ACL metadata the plugin needs for path
+ * enforcement, not just the y-sweet client token.
+ */
+interface TokenResult {
+  clientToken: ClientToken
+  role: string                // "admin" | "editor" | "viewer" | ""
+  pathAcls: PathACL[]
+}
+
 async function fetchClientToken(
   app: App,
   settings: NNNSyncSettings,
   onSessionRefresh: (token: string, expiresAt: string) => Promise<void>,
-): Promise<ClientToken> {
+): Promise<TokenResult> {
 
   const ensureSession = async () => {
     if (isSessionValid(settings)) return
@@ -311,8 +388,16 @@ async function fetchClientToken(
   }
 
   const body = await res.json()
-  if (body.clientToken) return body.clientToken as ClientToken
-  return body as ClientToken
+  // Server returns { clientToken, role, pathAcls } since v1.3.0. If we hit an
+  // older server it may still return just the raw clientToken — handle both.
+  if (body && typeof body === 'object' && 'clientToken' in body) {
+    return {
+      clientToken: body.clientToken as ClientToken,
+      role:        typeof body.role === 'string' ? body.role : '',
+      pathAcls:    Array.isArray(body.pathAcls) ? body.pathAcls as PathACL[] : [],
+    }
+  }
+  return { clientToken: body as ClientToken, role: '', pathAcls: [] }
 }
 
 // ── Plugin ────────────────────────────────────────────────────────────────────
@@ -332,6 +417,14 @@ export default class NNNSyncPlugin extends Plugin {
   private remoteWriteCount = 0
   private syncEventCleanups: Array<() => void> = []
   private editorDebounce: ReturnType<typeof setTimeout> | null = null
+
+  // ACL state (populated from /token response, refreshed on every fetch)
+  private pathAcls: PathACL[] = []
+  private userRole = ''
+
+  // Manifest reporting (debounced /vault/manifest POSTs)
+  private manifestDebounce: ReturnType<typeof setTimeout> | null = null
+  private lastManifestSig = ''
 
   async onload() {
     await this.loadSettings()
@@ -391,8 +484,17 @@ export default class NNNSyncPlugin extends Plugin {
       }
 
       const app = this.app
+      // YSweetProvider expects a () => Promise<ClientToken>. We wrap fetchClientToken
+      // so the plugin captures role + pathAcls each time the token is refreshed
+      // (initial connect AND every WebSocket reconnect — keeps ACLs current).
+      const tokenSource = async (): Promise<ClientToken> => {
+        const result = await fetchClientToken(app, s, onSessionRefresh)
+        this.userRole = result.role
+        this.pathAcls = result.pathAcls
+        return result.clientToken
+      }
       this.provider = new YSweetProvider(
-        () => fetchClientToken(app, s, onSessionRefresh),
+        tokenSource,
         s.docId,
         this.ydoc,
         { connect: true },
@@ -423,6 +525,55 @@ export default class NNNSyncPlugin extends Plugin {
     }
   }
 
+  // ── ACL helpers (per-path enforcement against pathAcls from /token) ─────
+
+  /** Effective permission for a vault-relative file path. */
+  private permissionFor(path: string): Permission {
+    return effectivePermission(this.userRole, this.pathAcls, path)
+  }
+
+  // ── Manifest reporting (POST /vault/manifest, debounced) ────────────────
+
+  /**
+   * Schedule a delayed POST /vault/manifest with the current Y.Map keys.
+   * Called from observers + initVaultSync; coalesces bursts of changes into
+   * a single network round-trip.
+   */
+  private scheduleManifestSend(delayMs = 5000) {
+    if (this.manifestDebounce) clearTimeout(this.manifestDebounce)
+    this.manifestDebounce = setTimeout(() => { void this.sendManifest() }, delayMs)
+  }
+
+  /**
+   * Send the current file list to the server. Skipped if the list is
+   * unchanged since the last successful send (signature-based dedup).
+   * Best-effort: failures are logged but don't break sync.
+   */
+  private async sendManifest() {
+    if (!this.filesMap || !this.settings.sessionToken) return
+    const paths = Array.from(this.filesMap.keys()).filter(isSyncable).sort()
+    const sig = paths.join('\n')
+    if (sig === this.lastManifestSig) return
+    try {
+      const url = this.settings.spaceUrl.replace(/\/$/, '') + '/vault/manifest'
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Plugin-Version': PLUGIN_VERSION },
+        body: JSON.stringify({
+          sessionToken: this.settings.sessionToken,
+          docId:        this.settings.docId,
+          paths,
+        }),
+      })
+      if (res.ok) {
+        this.lastManifestSig = sig
+      } else if (res.status === 401) {
+        // Session likely expired between connect and now — let the next
+        // YSweetProvider reconnect refresh the token; we just skip this send.
+      }
+    } catch { /* network blip — try again on next observer tick */ }
+  }
+
   stopSync() {
     logout(this.settings)
 
@@ -434,9 +585,16 @@ export default class NNNSyncPlugin extends Plugin {
     this.filesMap = null
     this.vaultSyncReady = false
     this.remoteWriteCount = 0
+    this.pathAcls = []
+    this.userRole = ''
+    this.lastManifestSig = ''
     if (this.editorDebounce) {
       clearTimeout(this.editorDebounce)
       this.editorDebounce = null
+    }
+    if (this.manifestDebounce) {
+      clearTimeout(this.manifestDebounce)
+      this.manifestDebounce = null
     }
 
     if (this.provider) {
@@ -464,10 +622,13 @@ export default class NNNSyncPlugin extends Plugin {
 
     this.filesMap = this.ydoc.getMap<Y.Text>('files')
 
-    // Step 1 — Pull: create local files that exist remotely but not locally
+    // Step 1 — Pull: create local files that exist remotely but not locally.
+    //          Skip any path the user has 'none' permission on — those files
+    //          must never materialize in the local vault for this user.
     for (const [rawPath, ytext] of this.filesMap.entries()) {
       const path = normalizePath(rawPath)
       if (!isSyncable(path)) continue
+      if (this.permissionFor(path) === 'none') continue
       if (!this.app.vault.getAbstractFileByPath(path)) {
         await ensureParentDirs(this.app.vault, path)
         this.remoteWriteCount++
@@ -477,11 +638,14 @@ export default class NNNSyncPlugin extends Plugin {
       this.attachYTextObserver(path, ytext)
     }
 
-    // Step 2 — Push: add local files that are not yet in the remote map
+    // Step 2 — Push: add local files that are not yet in the remote map.
+    //          Skip files the user does not have 'write' permission on —
+    //          a viewer or read-only-path user can't seed new files.
     for (const file of this.app.vault.getFiles()) {
       if (!isSyncable(file.path)) continue
       const path = normalizePath(file.path)
       if (this.filesMap.has(path)) continue
+      if (this.permissionFor(path) !== 'write') continue
       const content = await this.app.vault.read(file)
       this.ydoc!.transact(() => {
         if (this.filesMap!.has(path)) return // remote added it between read and transact
@@ -493,8 +657,12 @@ export default class NNNSyncPlugin extends Plugin {
       if (ytext) this.attachYTextObserver(path, ytext)
     }
 
-    // Step 3 — Watch Y.Map for remote file-level events (add / delete)
+    // Step 3 — Watch Y.Map for remote file-level events (add / delete).
+    //          Both local-originated and remote-originated map changes
+    //          schedule a manifest re-send so the server's vault_paths
+    //          stays current with what the plugin sees.
     const mapObserver = (event: Y.YMapEvent<Y.Text>, txn: Y.Transaction) => {
+      this.scheduleManifestSend()
       if (txn.origin === 'vault-local') return
       void this.onRemoteMapChange(event)
     }
@@ -520,6 +688,12 @@ export default class NNNSyncPlugin extends Plugin {
     this.syncEventCleanups.push(() => this.app.workspace.offref(refEditor))
 
     new Notice('NNN Sync: vault sync active ✓')
+
+    // Initial manifest report — send the current vault file list to the
+    // server so /admin/docs/tree + /admin/acls/preview can show the real
+    // folder/file structure (rather than just the docId). Short delay so
+    // any push-on-connect from Step 2 lands in the map first.
+    this.scheduleManifestSend(1500)
   }
 
   // ── Y.Text observer — remote content → local vault / editor ──────────────
@@ -533,6 +707,12 @@ export default class NNNSyncPlugin extends Plugin {
 
   private async applyRemoteContent(path: string, content: string) {
     const vault = this.app.vault
+
+    // ACL gate: if the user has no read access to this path, don't surface
+    // remote content. The file should not exist locally for this user; if it
+    // does (stale from a previous role), leave it alone — deleting is the
+    // server's prerogative, not ours.
+    if (this.permissionFor(path) === 'none') return
 
     // If this file is currently open in the editor, update the editor directly.
     // Obsidian auto-saves the editor to disk, so we don't also write the file.
@@ -581,6 +761,10 @@ export default class NNNSyncPlugin extends Plugin {
       } else if (change.action === 'add') {
         const ytext = this.filesMap!.get(rawPath)
         if (!ytext) continue
+        // ACL gate: hide files the user has no permission to see. Attach the
+        // observer either way so we react if permission later changes from a
+        // role grant — but suppress the local file creation for 'none'.
+        if (this.permissionFor(path) === 'none') continue
         this.attachYTextObserver(path, ytext)
         if (!this.app.vault.getAbstractFileByPath(path)) {
           await ensureParentDirs(this.app.vault, path)
@@ -599,6 +783,10 @@ export default class NNNSyncPlugin extends Plugin {
     if (!(file instanceof TFile) || !isSyncable(file.path)) return
     const path = normalizePath(file.path)
     if (this.filesMap.has(path)) return
+    if (this.permissionFor(path) !== 'write') {
+      new Notice(`NNN Sync: not allowed to create files at ${path} — read-only`)
+      return
+    }
     const content = await this.app.vault.read(file)
     this.ydoc!.transact(() => {
       if (this.filesMap!.has(path)) return
@@ -614,6 +802,7 @@ export default class NNNSyncPlugin extends Plugin {
     if (!this.filesMap || this.remoteWriteCount > 0) return
     if (!isSyncable(file.path)) return
     const path = normalizePath(file.path)
+    if (this.permissionFor(path) !== 'write') return // silent — modify fires per keystroke
     const content = await this.app.vault.read(file)
     const ytext = this.filesMap.get(path)
     if (ytext) {
@@ -638,6 +827,10 @@ export default class NNNSyncPlugin extends Plugin {
     if (!this.filesMap || this.remoteWriteCount > 0) return
     if (!(file instanceof TFile) || !isSyncable(file.path)) return
     const path = normalizePath(file.path)
+    if (this.permissionFor(path) !== 'write') {
+      new Notice(`NNN Sync: not allowed to delete ${path} — read-only`)
+      return
+    }
     this.ydoc!.transact(() => { this.filesMap!.delete(path) }, 'vault-local')
   }
 
@@ -646,6 +839,14 @@ export default class NNNSyncPlugin extends Plugin {
     if (!(file instanceof TFile)) return
     const newPath = normalizePath(file.path)
     const oldNorm = normalizePath(oldPath)
+    // Rename requires write on BOTH old and new paths — moving a file from a
+    // read-only area into a writable area (or vice versa) would let a user
+    // bypass the ACL at the file content level. Refuse if either side denies.
+    if (this.permissionFor(oldNorm) !== 'write' ||
+        (isSyncable(newPath) && this.permissionFor(newPath) !== 'write')) {
+      new Notice(`NNN Sync: rename ${oldNorm} → ${newPath} not allowed — read-only path`)
+      return
+    }
     const content = isSyncable(newPath) ? await this.app.vault.read(file) : ''
     this.ydoc!.transact(() => {
       if (this.filesMap!.has(oldNorm)) this.filesMap!.delete(oldNorm)
@@ -675,6 +876,7 @@ export default class NNNSyncPlugin extends Plugin {
 
   private flushEditorToYText(editor: Editor, path: string) {
     if (!this.filesMap || !this.ydoc) return
+    if (this.permissionFor(path) !== 'write') return // silent — editor-change fires per keystroke
     const content = editor.getValue()
     const ytext = this.filesMap.get(path)
     if (!ytext) return
