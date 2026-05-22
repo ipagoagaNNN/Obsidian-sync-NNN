@@ -55,7 +55,11 @@ import * as Y from 'yjs'
 import { YSweetProvider } from '@y-sweet/client'
 import type { ClientToken } from '@y-sweet/sdk'
 
-const PLUGIN_VERSION = '1.3.0'
+const PLUGIN_VERSION = '1.3.1'
+
+// Pinned source for in-app updates (must match install-windows.ps1 / install-macos.sh).
+const PLUGIN_REPO_OWNER = 'ipagoagaNNN'
+const PLUGIN_REPO_NAME  = 'Obsidian-sync-NNN'
 
 // ── ACL types (mirrors server's pathACL struct in types.go) ───────────────────
 
@@ -177,6 +181,44 @@ function effectivePermission(role: string, acls: PathACL[], path: string): Permi
     }
   }
   return roleDefaultPerm(role)
+}
+
+// ── In-app updater helpers (mirrors install-windows.ps1 / install-macos.sh) ───
+
+/** Compare two dot-separated versions. Returns -1, 0, or 1. Treats "1.3.0" < "1.3.1" < "1.4". */
+function compareVersions(a: string, b: string): number {
+  const pa = a.replace(/^v/, '').split('.').map(n => parseInt(n, 10) || 0)
+  const pb = b.replace(/^v/, '').split('.').map(n => parseInt(n, 10) || 0)
+  const len = Math.max(pa.length, pb.length)
+  for (let i = 0; i < len; i++) {
+    const x = pa[i] ?? 0
+    const y = pb[i] ?? 0
+    if (x < y) return -1
+    if (x > y) return  1
+  }
+  return 0
+}
+
+/** SHA256 hash of a string (UTF-8 encoded), returned as lowercase hex. */
+async function sha256Hex(text: string): Promise<string> {
+  const buf = new TextEncoder().encode(text)
+  const hashBuf = await crypto.subtle.digest('SHA-256', buf)
+  return Array.from(new Uint8Array(hashBuf))
+    .map(b => b.toString(16).padStart(2, '0'))
+    .join('')
+}
+
+interface ReleaseAsset { name: string; browser_download_url: string }
+interface ReleaseMeta  { tag_name: string; assets: ReleaseAsset[] }
+
+/** Fetch the latest release metadata from the pinned GitHub repo. */
+async function fetchLatestRelease(): Promise<ReleaseMeta> {
+  const url = `https://api.github.com/repos/${PLUGIN_REPO_OWNER}/${PLUGIN_REPO_NAME}/releases/latest`
+  const res = await fetch(url, {
+    headers: { 'User-Agent': 'NNN-Sync-Plugin', 'Accept': 'application/vnd.github+json' },
+  })
+  if (!res.ok) throw new Error(`GitHub API ${res.status}`)
+  return await res.json() as ReleaseMeta
 }
 
 // ── Password-change modal ─────────────────────────────────────────────────────
@@ -431,6 +473,13 @@ export default class NNNSyncPlugin extends Plugin {
   private manifestDebounce: ReturnType<typeof setTimeout> | null = null
   private lastManifestSig = ''
 
+  // In-app updater state (driven from the settings tab)
+  latestVersion: string | null = null      // null = not checked, '' = check failed
+  updateChecking = false
+  updating = false
+  // Callback invoked whenever the above three change, so SettingTab can rerender.
+  onUpdateStateChange: (() => void) | null = null
+
   async onload() {
     await this.loadSettings()
     this.addSettingTab(new NNNSyncSettingTab(this.app, this))
@@ -577,6 +626,104 @@ export default class NNNSyncPlugin extends Plugin {
         // YSweetProvider reconnect refresh the token; we just skip this send.
       }
     } catch { /* network blip — try again on next observer tick */ }
+  }
+
+  // ── In-app updater ─────────────────────────────────────────────────────────
+
+  /**
+   * Query GitHub for the latest release version. Updates `latestVersion`
+   * and notifies the settings tab to rerender. Safe to call repeatedly —
+   * if already checking, the call is a no-op.
+   */
+  async checkForUpdate() {
+    if (this.updateChecking) return
+    this.updateChecking = true
+    this.onUpdateStateChange?.()
+    try {
+      const release = await fetchLatestRelease()
+      this.latestVersion = release.tag_name.replace(/^v/, '')
+    } catch {
+      this.latestVersion = '' // sentinel: check failed
+    } finally {
+      this.updateChecking = false
+      this.onUpdateStateChange?.()
+    }
+  }
+
+  /** True if a newer version is available. */
+  isUpdateAvailable(): boolean {
+    return !!this.latestVersion && compareVersions(this.latestVersion, PLUGIN_VERSION) > 0
+  }
+
+  /**
+   * Download the latest release artifacts, verify SHA256, write to the
+   * plugin folder via the vault adapter, then resolve. Caller is responsible
+   * for showing the "reload Obsidian" prompt afterwards.
+   *
+   * Mirrors install-windows.ps1 / install-macos.sh Layer 1 defenses:
+   * version-floor (won't downgrade) + SHA256 verify before writing.
+   */
+  async performUpdate(): Promise<{ version: string }> {
+    if (this.updating) throw new Error('Update already in progress')
+    this.updating = true
+    this.onUpdateStateChange?.()
+    try {
+      const release = await fetchLatestRelease()
+      const newVer = release.tag_name.replace(/^v/, '')
+      if (compareVersions(newVer, PLUGIN_VERSION) <= 0) {
+        throw new Error(`Refusing to "update" to v${newVer} — current is v${PLUGIN_VERSION}`)
+      }
+
+      const grab = async (name: string) => {
+        const asset = release.assets.find(a => a.name === name)
+        if (!asset) throw new Error(`Release v${newVer} is missing asset '${name}'`)
+        const res = await fetch(asset.browser_download_url, {
+          headers: { 'User-Agent': 'NNN-Sync-Plugin' },
+        })
+        if (!res.ok) throw new Error(`Download ${name} failed: ${res.status}`)
+        return await res.text()
+      }
+
+      const [mainJs, manifestJson, sha256Sums] = await Promise.all([
+        grab('main.js'),
+        grab('manifest.json'),
+        grab('SHA256SUMS'),
+      ])
+
+      // Parse SHA256SUMS — "<hex>  <filename>" per line.
+      const expected: Record<string, string> = {}
+      for (const line of sha256Sums.split(/\r?\n/)) {
+        const m = line.trim().match(/^([0-9a-fA-F]{64})\s+(.+)$/)
+        if (m) expected[m[2]] = m[1].toLowerCase()
+      }
+
+      for (const [name, content] of [['main.js', mainJs], ['manifest.json', manifestJson]]) {
+        const want = expected[name]
+        if (!want) throw new Error(`SHA256SUMS missing entry for ${name}`)
+        const got = await sha256Hex(content)
+        if (got !== want) {
+          throw new Error(`SHA256 mismatch for ${name} — refusing to install`)
+        }
+      }
+
+      // Cross-check: manifest.json's version must equal the release tag.
+      const newManifest = JSON.parse(manifestJson)
+      if (newManifest.version !== newVer) {
+        throw new Error(`manifest.json version ${newManifest.version} != tag ${newVer}`)
+      }
+
+      // Write into the plugin folder. vault.adapter paths are vault-relative;
+      // .obsidian/plugins/<id>/ is reachable.
+      const dir = `${this.app.vault.configDir}/plugins/nnn-hf-sync`
+      await this.app.vault.adapter.write(`${dir}/main.js`,       mainJs)
+      await this.app.vault.adapter.write(`${dir}/manifest.json`, manifestJson)
+
+      this.latestVersion = newVer
+      return { version: newVer }
+    } finally {
+      this.updating = false
+      this.onUpdateStateChange?.()
+    }
   }
 
   stopSync() {
@@ -988,6 +1135,9 @@ class NNNSyncSettingTab extends PluginSettingTab {
       : '⚠️ No active session — will authenticate on connect.'
     containerEl.createEl('p', { text: sessionDesc, cls: 'setting-item-description' })
 
+    // Plugin version + in-app updater (rerenders whenever update state changes)
+    this.renderVersionSection(containerEl)
+
     containerEl.createEl('h3', { text: 'Connection' })
 
     new Setting(containerEl)
@@ -1001,4 +1151,112 @@ class NNNSyncSettingTab extends PluginSettingTab {
         .setButtonText('Disconnect')
         .onClick(() => this.plugin.stopSync()))
   }
+
+  /**
+   * Render the "Plugin version" row with an Update button if a newer
+   * version is available. Re-rendered in place when the check completes
+   * or when an update finishes, via plugin.onUpdateStateChange.
+   */
+  private renderVersionSection(containerEl: HTMLElement) {
+    const wrap = containerEl.createDiv({ cls: 'nnn-version-row' })
+    wrap.style.margin = '8px 0 14px 0'
+    wrap.style.display = 'flex'
+    wrap.style.alignItems = 'center'
+    wrap.style.gap = '10px'
+    wrap.style.fontSize = '0.85rem'
+
+    const render = () => {
+      wrap.empty()
+      const label = wrap.createSpan()
+      const latest = this.plugin.latestVersion
+
+      if (this.plugin.updating) {
+        label.setText(`Plugin version v${PLUGIN_VERSION} — updating…`)
+        return
+      }
+      if (latest === null) {
+        // Not checked yet
+        label.setText(`Plugin version v${PLUGIN_VERSION} — checking for updates…`)
+        return
+      }
+      if (latest === '') {
+        // Check failed
+        label.setText(`Plugin version v${PLUGIN_VERSION}  `)
+        wrap.createSpan({ cls: 'nnn-version-hint', text: '(couldn’t reach GitHub — try again later)' })
+          .setAttr('style', 'color: var(--muted, #888); font-size: 0.78rem;')
+        const retry = wrap.createEl('button', { text: 'Retry', cls: 'mod-cta' })
+        retry.style.padding = '2px 10px'
+        retry.style.fontSize = '0.78rem'
+        retry.onclick = async () => {
+          this.plugin.latestVersion = null
+          render()
+          await this.plugin.checkForUpdate()
+        }
+        return
+      }
+      if (this.plugin.isUpdateAvailable()) {
+        label.setText(`Plugin version v${PLUGIN_VERSION}  →  v${latest} available`)
+        label.style.color = 'var(--text-warning, #f59e0b)'
+        const updateBtn = wrap.createEl('button', { text: 'Update now', cls: 'mod-cta' })
+        updateBtn.style.padding = '3px 12px'
+        updateBtn.onclick = () => this.handleUpdateClick(updateBtn)
+        return
+      }
+      // Up to date
+      label.setText(`Plugin version v${PLUGIN_VERSION}  `)
+      wrap.createSpan({ text: '✓ Up to date' })
+        .setAttr('style', 'color: var(--text-success, #4ade80); font-weight: 500;')
+    }
+
+    this.plugin.onUpdateStateChange = render
+    render()
+
+    // Trigger a check if we haven't yet this session
+    if (this.plugin.latestVersion === null && !this.plugin.updateChecking) {
+      void this.plugin.checkForUpdate()
+    }
+  }
+
+  private async handleUpdateClick(btn: HTMLButtonElement) {
+    btn.disabled = true
+    btn.setText('Downloading…')
+    try {
+      const { version } = await this.plugin.performUpdate()
+      btn.setText('Done')
+      new ReloadPromptModal(this.app, version).open()
+    } catch (e) {
+      btn.disabled = false
+      btn.setText('Update now')
+      new Notice(`NNN Sync: update failed — ${(e as Error).message}`)
+    }
+  }
+}
+
+/**
+ * Shown after a successful in-app update. Offers to reload Obsidian so the
+ * new plugin code becomes active. "Later" closes the modal; user can reload
+ * manually via Cmd/Ctrl+P → "Reload app without saving" whenever they want.
+ */
+class ReloadPromptModal extends Modal {
+  private newVersion: string
+  constructor(app: App, newVersion: string) {
+    super(app)
+    this.newVersion = newVersion
+  }
+  onOpen() {
+    const { contentEl } = this
+    contentEl.empty()
+    contentEl.createEl('h2', { text: `✓ Updated to v${this.newVersion}` })
+    contentEl.createEl('p', {
+      text: 'The new plugin files are on disk. Obsidian needs to reload to activate them — your current edits are preserved.',
+    })
+    new Setting(contentEl)
+      .addButton(btn => btn.setButtonText('Reload now').setCta().onClick(() => {
+        this.close()
+        // app:reload is Obsidian's built-in full-restart command.
+        ;(this.app as any).commands.executeCommandById('app:reload')
+      }))
+      .addButton(btn => btn.setButtonText('Later').onClick(() => this.close()))
+  }
+  onClose() { this.contentEl.empty() }
 }

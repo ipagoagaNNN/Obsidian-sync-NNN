@@ -1,7 +1,7 @@
 {
   "id": "nnn-hf-sync",
   "name": "NNN HF Sync",
-  "version": "1.3.0",
+  "version": "1.3.1",
   "minAppVersion": "1.4.0",
   "description": "Real-time vault sync via y-sweet on a Hugging Face Space.",
   "author": "NNN",
