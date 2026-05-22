@@ -55,7 +55,7 @@ import * as Y from 'yjs'
 import { YSweetProvider } from '@y-sweet/client'
 import type { ClientToken } from '@y-sweet/sdk'
 
-const PLUGIN_VERSION = '1.3.1'
+const PLUGIN_VERSION = '1.4.0'
 
 // Pinned source for in-app updates (must match install-windows.ps1 / install-macos.sh).
 const PLUGIN_REPO_OWNER = 'ipagoagaNNN'
@@ -67,6 +67,13 @@ const PLUGIN_REPO_NAME  = 'Obsidian-sync-NNN'
 interface PathACL {
   path: string
   permission: 'read' | 'write' | 'none'
+  /**
+   * Tier of this rule. Server returns rows in user → role → default order
+   * and the plugin walks them as-is — first match wins. Added in v1.4.0
+   * to support path-default ACLs (everyone-default policy, enabling
+   * "private folder" semantics).
+   */
+  source?: 'user' | 'role' | 'default'
 }
 
 /** Effective per-file permission derived from pathAcls + user role. */
@@ -473,6 +480,11 @@ export default class NNNSyncPlugin extends Plugin {
   private manifestDebounce: ReturnType<typeof setTimeout> | null = null
   private lastManifestSig = ''
 
+  // ACL refresh (3-min polling via GET /vault/acls — lets ACL changes
+  // propagate to live clients without reconnect)
+  private aclRefreshInterval: ReturnType<typeof setInterval> | null = null
+  private reconcileInProgress = false
+
   // In-app updater state (driven from the settings tab)
   latestVersion: string | null = null      // null = not checked, '' = check failed
   updateChecking = false
@@ -628,6 +640,84 @@ export default class NNNSyncPlugin extends Plugin {
     } catch { /* network blip — try again on next observer tick */ }
   }
 
+  // ── ACL refresh + reconciliation (v1.4.0) ──────────────────────────────────
+
+  /**
+   * Re-fetch the caller's current pathAcls + role from the server without
+   * going through /token (cheaper — no y-sweet roundtrip). Called every
+   * 3 minutes by aclRefreshInterval. If the ACL set actually changed,
+   * runs reconcileLocalVault to delete-on-deny any newly-restricted files.
+   */
+  private async refreshACLs() {
+    if (!this.settings.sessionToken) return
+    try {
+      const url = this.settings.spaceUrl.replace(/\/$/, '') + '/vault/acls'
+      const res = await fetch(url, {
+        headers: {
+          'Authorization':    `Bearer ${this.settings.sessionToken}`,
+          'X-Plugin-Version': PLUGIN_VERSION,
+        },
+      })
+      if (!res.ok) return
+      const data = await res.json()
+      const newAcls: PathACL[] = Array.isArray(data?.pathAcls) ? data.pathAcls : []
+      const newRole = typeof data?.role === 'string' ? data.role : ''
+
+      const sig = (a: PathACL[]) =>
+        a.map(x => `${x.source ?? ''}:${x.path}:${x.permission}`).sort().join('|')
+      const changed = sig(newAcls) !== sig(this.pathAcls) || newRole !== this.userRole
+
+      this.pathAcls = newAcls
+      this.userRole = newRole
+
+      if (changed) {
+        await this.reconcileLocalVault()
+      }
+    } catch { /* network blip — next 3-min tick will retry */ }
+  }
+
+  /**
+   * Walk Y.Map keys: for each tracked file where the current effective
+   * permission is 'none', delete the local copy. Does NOT touch the
+   * Y.Map — other users who DO have access keep the file.
+   *
+   * Destructive by design: the user has just lost access, so removing the
+   * local mirror is the desired "private folder is invisible" semantic.
+   * Writes are already blocked elsewhere so no local edits can be lost
+   * to this operation.
+   *
+   * Re-entrancy guard: this.reconcileInProgress prevents overlapping runs.
+   */
+  private async reconcileLocalVault() {
+    if (!this.filesMap || this.reconcileInProgress) return
+    this.reconcileInProgress = true
+    let removed = 0
+    try {
+      for (const [rawPath] of this.filesMap.entries()) {
+        const path = normalizePath(rawPath)
+        if (!isSyncable(path)) continue
+        if (this.permissionFor(path) !== 'none') continue
+        const file = this.app.vault.getAbstractFileByPath(path)
+        if (file instanceof TFile) {
+          this.remoteWriteCount++
+          try {
+            await this.app.vault.trash(file, true)
+            removed++
+          } catch {
+            // best-effort — file might have been moved or deleted concurrently
+          } finally {
+            this.remoteWriteCount--
+          }
+        }
+      }
+      if (removed > 0) {
+        new Notice(`NNN Sync: ${removed} file(s) hidden — access removed by admin`)
+      }
+    } finally {
+      this.reconcileInProgress = false
+    }
+  }
+
   // ── In-app updater ─────────────────────────────────────────────────────────
 
   /**
@@ -748,6 +838,11 @@ export default class NNNSyncPlugin extends Plugin {
       clearTimeout(this.manifestDebounce)
       this.manifestDebounce = null
     }
+    if (this.aclRefreshInterval) {
+      clearInterval(this.aclRefreshInterval)
+      this.aclRefreshInterval = null
+    }
+    this.reconcileInProgress = false
 
     if (this.provider) {
       this.provider.disconnect()
@@ -846,6 +941,22 @@ export default class NNNSyncPlugin extends Plugin {
     // folder/file structure (rather than just the docId). Short delay so
     // any push-on-connect from Step 2 lands in the map first.
     this.scheduleManifestSend(1500)
+
+    // Step 6 — ACL reconciliation. The pull loop (step 1) skipped any
+    // remote files where permission is 'none'. But files that the user
+    // had access to PREVIOUSLY and were already on disk before an admin
+    // restricted them won't have been touched by step 1. Walk Y.Map and
+    // delete any local file the user no longer has read access to.
+    await this.reconcileLocalVault()
+
+    // Step 7 — Periodic ACL refresh (every 3 min). Server-side ACL
+    // changes will reach this client within 3 minutes without requiring
+    // a reconnect; on change, reconcileLocalVault runs again.
+    if (this.aclRefreshInterval) clearInterval(this.aclRefreshInterval)
+    this.aclRefreshInterval = setInterval(
+      () => { void this.refreshACLs() },
+      3 * 60 * 1000,
+    )
   }
 
   // ── Y.Text observer — remote content → local vault / editor ──────────────
