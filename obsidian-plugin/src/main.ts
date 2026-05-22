@@ -1,65 +1,76 @@
 /**
  * NNN HF Sync — Obsidian plugin
- * v1.1.0 — Space is now public; native WebSocket used (no ws polyfill needed).
+ * v1.2.0 — Vault sync (Phase 4c) + live co-editing (Phase 4d)
  *
  * Auth flow
  * ─────────
  * 1. POST /auth/login  { username, password }
- *      → 200 { sessionToken, expiresAt, role }        normal login
- *      → 403 { requiresPasswordChange: true }          temp-password user
- *
- * 2. If 403+requiresPasswordChange:
- *      Show PasswordChangeModal.
- *      POST /auth/first-login { username, tempPassword, newPassword }
  *      → 200 { sessionToken, expiresAt, role }
- *      Store sessionToken; password field cleared from settings.
+ *      → 403 { requiresPasswordChange: true }
+ * 2. If 403: PasswordChangeModal → POST /auth/first-login
+ * 3. POST /token  { sessionToken, docId } → { clientToken, role, pathAcls }
+ * 4. POST /auth/logout  on stopSync / unload
  *
- * 3. POST /token  { sessionToken, docId }
- *      → { clientToken, role, pathAcls }
- *    If 401 → re-login (may trigger modal again if reset occurred).
+ * Vault sync (Phase 4c)
+ * ─────────────────────
+ * The y-sweet document for docId holds a shared Y.Map<path, Y.Text> under
+ * the key 'files'. This map IS the vault:
  *
- * 4. POST /auth/logout  Authorization: Bearer <sessionToken>
- *    Called on stopSync() and onunload().
+ *   files["Daily/2026-05-21.md"] = Y.Text("# Today...")
+ *   files["Projects/NNN.md"]     = Y.Text("# NNN Docs")
  *
- * WebSocket transport
- * ───────────────────
- * The HF Space is public — no Authorization header required on WebSocket
- * upgrades. Electron's native WebSocket is used directly. No ws polyfill.
- * Mobile support: deferred — see ADR-008.
+ * On connect:
+ *   - Pull: remote files missing locally  → create in vault
+ *   - Push: local files missing in remote → add to Y.Map
+ *   - Observe Y.Map for remote add/delete → mirror to vault
+ *   - Observe each Y.Text for content changes → write to disk or editor
+ *   - Watch vault events → push changes to Y.Map
+ *
+ * Live co-editing (Phase 4d)
+ * ──────────────────────────
+ * - editor-change event (debounced 200 ms) → flush to Y.Text
+ * - Remote Y.Text change → editor.setValue() if that file is open
+ * - Cursor position is preserved on remote updates (best-effort)
+ *
+ * Note: character-level CRDT with live cursors (y-codemirror.next) is
+ * Phase 4d-advanced. Current impl gives ~200 ms latency — sufficient for
+ * a doc-hub use case. True concurrent keystroke merging is a follow-up.
  */
 
 import {
   App,
+  Editor,
+  MarkdownView,
   Modal,
   Notice,
   Plugin,
   PluginSettingTab,
   Setting,
+  TAbstractFile,
+  TFile,
+  Vault,
+  normalizePath,
 } from 'obsidian'
 import * as Y from 'yjs'
 import { YSweetProvider } from '@y-sweet/client'
 import type { ClientToken } from '@y-sweet/sdk'
 
-const PLUGIN_VERSION = '1.1.0'
+const PLUGIN_VERSION = '1.2.0'
 
 // ── Settings ──────────────────────────────────────────────────────────────────
 
 interface NNNSyncSettings {
-  /** Full URL of the HF Space, e.g. https://ipagoaga-obsidian-sync.hf.space */
+  /** Full URL of the HF Space */
   spaceUrl: string
-  /** @deprecated No longer used — Space is public. Kept to avoid breaking saved data. */
+  /** @deprecated Space is public; kept to avoid breaking saved data */
   hfToken: string
-  /** Username for our auth-server */
   username: string
-  /** Temp/initial password — used once to obtain sessionToken, then cleared */
+  /** Temp password — cleared after first-login */
   password: string
-  /** Active session JWT — obtained from POST /auth/login or /auth/first-login */
   sessionToken: string
-  /** ISO-8601 expiry of the session token */
   sessionExpiresAt: string
-  /** y-sweet logical document ID for this vault */
+  /** y-sweet logical doc ID — represents the entire shared vault */
   docId: string
-  /** Whether sync is enabled */
   enabled: boolean
 }
 
@@ -74,13 +85,30 @@ const DEFAULT_SETTINGS: NNNSyncSettings = {
   enabled: false,
 }
 
+// ── Sync helpers ──────────────────────────────────────────────────────────────
+
+/** Only sync plain-text files; skip hidden files and binary formats */
+function isSyncable(path: string): boolean {
+  const base = path.split('/').pop() ?? path
+  if (base.startsWith('.')) return false
+  const ext = base.split('.').pop()?.toLowerCase() ?? ''
+  return ext === 'md' || ext === 'txt'
+}
+
+/** Create all ancestor directories of filePath that do not yet exist */
+async function ensureParentDirs(vault: Vault, filePath: string): Promise<void> {
+  const segments = normalizePath(filePath).split('/')
+  segments.pop()
+  for (let depth = 1; depth <= segments.length; depth++) {
+    const dir = segments.slice(0, depth).join('/')
+    if (!vault.getAbstractFileByPath(dir)) {
+      try { await vault.createFolder(dir) } catch { /* already exists — race */ }
+    }
+  }
+}
+
 // ── Password-change modal ─────────────────────────────────────────────────────
 
-/**
- * Shown when POST /auth/login returns 403 + requiresPasswordChange:true.
- * Prompts the user to set a permanent password before sync can proceed.
- * Resolves with the new sessionToken on success, or rejects if the user cancels.
- */
 class PasswordChangeModal extends Modal {
   private username: string
   private tempPassword: string
@@ -296,6 +324,15 @@ export default class NNNSyncPlugin extends Plugin {
   private provider: YSweetProvider | null = null
   private statusBarItem: HTMLElement | null = null
 
+  // Vault sync state
+  private filesMap: Y.Map<Y.Text> | null = null
+  private vaultSyncReady = false
+  // Counter > 0 means we are writing to vault from a remote change; vault
+  // event handlers check this to avoid echoing the write back to the Y.Map.
+  private remoteWriteCount = 0
+  private syncEventCleanups: Array<() => void> = []
+  private editorDebounce: ReturnType<typeof setTimeout> | null = null
+
   async onload() {
     await this.loadSettings()
     this.addSettingTab(new NNNSyncSettingTab(this.app, this))
@@ -354,7 +391,6 @@ export default class NNNSyncPlugin extends Plugin {
       }
 
       const app = this.app
-      // Native WebSocket — no polyfill needed (Space is public, no auth header required)
       this.provider = new YSweetProvider(
         () => fetchClientToken(app, s, onSessionRefresh),
         s.docId,
@@ -362,10 +398,10 @@ export default class NNNSyncPlugin extends Plugin {
         { connect: true },
       )
 
-      this.provider.on('connection-status', (status: string) => {
+      this.provider.on('connection-status', async (status: string) => {
         this.updateStatusBar(status)
         if (status === 'connected') {
-          new Notice('NNN Sync: connected ✓')
+          if (!this.vaultSyncReady) await this.initVaultSync()
         } else if (status === 'error') {
           new Notice('NNN Sync: connection error — retrying…')
         }
@@ -389,6 +425,20 @@ export default class NNNSyncPlugin extends Plugin {
 
   stopSync() {
     logout(this.settings)
+
+    // Tear down vault sync
+    for (const cleanup of this.syncEventCleanups) {
+      try { cleanup() } catch { /* ignore */ }
+    }
+    this.syncEventCleanups = []
+    this.filesMap = null
+    this.vaultSyncReady = false
+    this.remoteWriteCount = 0
+    if (this.editorDebounce) {
+      clearTimeout(this.editorDebounce)
+      this.editorDebounce = null
+    }
+
     if (this.provider) {
       this.provider.disconnect()
       this.provider.destroy()
@@ -398,12 +448,244 @@ export default class NNNSyncPlugin extends Plugin {
       this.ydoc.destroy()
       this.ydoc = null
     }
+
     this.settings.sessionToken = ''
     this.settings.sessionExpiresAt = ''
     this.settings.enabled = false
     this.saveSettings()
     this.updateStatusBar('idle')
   }
+
+  // ── Vault sync initialisation ─────────────────────────────────────────────
+
+  private async initVaultSync() {
+    if (this.vaultSyncReady || !this.ydoc) return
+    this.vaultSyncReady = true
+
+    this.filesMap = this.ydoc.getMap<Y.Text>('files')
+
+    // Step 1 — Pull: create local files that exist remotely but not locally
+    for (const [rawPath, ytext] of this.filesMap.entries()) {
+      const path = normalizePath(rawPath)
+      if (!isSyncable(path)) continue
+      if (!this.app.vault.getAbstractFileByPath(path)) {
+        await ensureParentDirs(this.app.vault, path)
+        this.remoteWriteCount++
+        try { await this.app.vault.create(path, ytext.toString()) }
+        finally { this.remoteWriteCount-- }
+      }
+      this.attachYTextObserver(path, ytext)
+    }
+
+    // Step 2 — Push: add local files that are not yet in the remote map
+    for (const file of this.app.vault.getFiles()) {
+      if (!isSyncable(file.path)) continue
+      const path = normalizePath(file.path)
+      if (this.filesMap.has(path)) continue
+      const content = await this.app.vault.read(file)
+      this.ydoc!.transact(() => {
+        if (this.filesMap!.has(path)) return // remote added it between read and transact
+        const ytext = new Y.Text()
+        this.filesMap!.set(path, ytext)
+        ytext.insert(0, content)
+      }, 'vault-local')
+      const ytext = this.filesMap.get(path)
+      if (ytext) this.attachYTextObserver(path, ytext)
+    }
+
+    // Step 3 — Watch Y.Map for remote file-level events (add / delete)
+    const mapObserver = (event: Y.YMapEvent<Y.Text>, txn: Y.Transaction) => {
+      if (txn.origin === 'vault-local') return
+      void this.onRemoteMapChange(event)
+    }
+    this.filesMap.observe(mapObserver)
+    this.syncEventCleanups.push(() => this.filesMap?.unobserve(mapObserver))
+
+    // Step 4 — Watch local vault events
+    const refCreate = this.app.vault.on('create', (f) => void this.onLocalCreate(f))
+    const refModify = this.app.vault.on('modify', (f) => void this.onLocalModify(f as TFile))
+    const refDelete = this.app.vault.on('delete', (f) => this.onLocalDelete(f))
+    const refRename = this.app.vault.on('rename', (f, old) => void this.onLocalRename(f, old))
+    this.syncEventCleanups.push(
+      () => this.app.vault.offref(refCreate),
+      () => this.app.vault.offref(refModify),
+      () => this.app.vault.offref(refDelete),
+      () => this.app.vault.offref(refRename),
+    )
+
+    // Step 5 — Phase 4d: live editor → Y.Text (debounced keystrokes)
+    const refEditor = this.app.workspace.on('editor-change', (editor, view) => {
+      if (view instanceof MarkdownView) this.onEditorChange(editor, view)
+    })
+    this.syncEventCleanups.push(() => this.app.workspace.offref(refEditor))
+
+    new Notice('NNN Sync: vault sync active ✓')
+  }
+
+  // ── Y.Text observer — remote content → local vault / editor ──────────────
+
+  private attachYTextObserver(path: string, ytext: Y.Text) {
+    ytext.observe((_event: Y.YTextEvent, txn: Y.Transaction) => {
+      if (txn.origin === 'vault-local') return
+      void this.applyRemoteContent(path, ytext.toString())
+    })
+  }
+
+  private async applyRemoteContent(path: string, content: string) {
+    const vault = this.app.vault
+
+    // If this file is currently open in the editor, update the editor directly.
+    // Obsidian auto-saves the editor to disk, so we don't also write the file.
+    const mdView = this.app.workspace.getActiveViewOfType(MarkdownView)
+    if (mdView?.file?.path === path) {
+      const editor = mdView.editor
+      if (editor.getValue() !== content) {
+        const cursor = editor.getCursor()
+        this.remoteWriteCount++
+        editor.setValue(content)
+        this.remoteWriteCount--
+        try { editor.setCursor(cursor) } catch { /* cursor may be beyond new content */ }
+      }
+      return
+    }
+
+    // File is not open — write straight to disk
+    this.remoteWriteCount++
+    try {
+      const existing = vault.getAbstractFileByPath(path)
+      if (!existing) {
+        await ensureParentDirs(vault, path)
+        await vault.create(path, content)
+      } else if (existing instanceof TFile) {
+        await vault.modify(existing, content)
+      }
+    } finally {
+      this.remoteWriteCount--
+    }
+  }
+
+  // ── Remote Y.Map changes — file created / deleted by another user ─────────
+
+  private async onRemoteMapChange(event: Y.YMapEvent<Y.Text>) {
+    for (const [rawPath, change] of event.changes.keys) {
+      const path = normalizePath(rawPath)
+      if (!isSyncable(path)) continue
+
+      if (change.action === 'delete') {
+        const file = this.app.vault.getAbstractFileByPath(path)
+        if (file instanceof TFile) {
+          this.remoteWriteCount++
+          try { await this.app.vault.trash(file, true) }
+          finally { this.remoteWriteCount-- }
+        }
+      } else if (change.action === 'add') {
+        const ytext = this.filesMap!.get(rawPath)
+        if (!ytext) continue
+        this.attachYTextObserver(path, ytext)
+        if (!this.app.vault.getAbstractFileByPath(path)) {
+          await ensureParentDirs(this.app.vault, path)
+          this.remoteWriteCount++
+          try { await this.app.vault.create(path, ytext.toString()) }
+          finally { this.remoteWriteCount-- }
+        }
+      }
+    }
+  }
+
+  // ── Local vault events → Y.Map ────────────────────────────────────────────
+
+  private async onLocalCreate(file: TAbstractFile) {
+    if (!this.filesMap || this.remoteWriteCount > 0) return
+    if (!(file instanceof TFile) || !isSyncable(file.path)) return
+    const path = normalizePath(file.path)
+    if (this.filesMap.has(path)) return
+    const content = await this.app.vault.read(file)
+    this.ydoc!.transact(() => {
+      if (this.filesMap!.has(path)) return
+      const ytext = new Y.Text()
+      this.filesMap!.set(path, ytext)
+      ytext.insert(0, content)
+    }, 'vault-local')
+    const ytext = this.filesMap.get(path)
+    if (ytext) this.attachYTextObserver(path, ytext)
+  }
+
+  private async onLocalModify(file: TFile) {
+    if (!this.filesMap || this.remoteWriteCount > 0) return
+    if (!isSyncable(file.path)) return
+    const path = normalizePath(file.path)
+    const content = await this.app.vault.read(file)
+    const ytext = this.filesMap.get(path)
+    if (ytext) {
+      if (ytext.toString() === content) return
+      this.ydoc!.transact(() => {
+        ytext.delete(0, ytext.length)
+        ytext.insert(0, content)
+      }, 'vault-local')
+    } else {
+      // File on disk but not yet in map — add it
+      this.ydoc!.transact(() => {
+        const newYText = new Y.Text()
+        this.filesMap!.set(path, newYText)
+        newYText.insert(0, content)
+      }, 'vault-local')
+      const newYText = this.filesMap.get(path)
+      if (newYText) this.attachYTextObserver(path, newYText)
+    }
+  }
+
+  private onLocalDelete(file: TAbstractFile) {
+    if (!this.filesMap || this.remoteWriteCount > 0) return
+    if (!(file instanceof TFile) || !isSyncable(file.path)) return
+    const path = normalizePath(file.path)
+    this.ydoc!.transact(() => { this.filesMap!.delete(path) }, 'vault-local')
+  }
+
+  private async onLocalRename(file: TAbstractFile, oldPath: string) {
+    if (!this.filesMap || this.remoteWriteCount > 0) return
+    if (!(file instanceof TFile)) return
+    const newPath = normalizePath(file.path)
+    const oldNorm = normalizePath(oldPath)
+    const content = isSyncable(newPath) ? await this.app.vault.read(file) : ''
+    this.ydoc!.transact(() => {
+      if (this.filesMap!.has(oldNorm)) this.filesMap!.delete(oldNorm)
+      if (isSyncable(newPath)) {
+        const ytext = new Y.Text()
+        this.filesMap!.set(newPath, ytext)
+        ytext.insert(0, content)
+      }
+    }, 'vault-local')
+    if (isSyncable(newPath)) {
+      const ytext = this.filesMap.get(newPath)
+      if (ytext) this.attachYTextObserver(newPath, ytext)
+    }
+  }
+
+  // ── Phase 4d: active editor → Y.Text (debounced) ─────────────────────────
+
+  private onEditorChange(editor: Editor, view: MarkdownView) {
+    if (!this.filesMap || this.remoteWriteCount > 0 || !view.file) return
+    if (!isSyncable(view.file.path)) return
+    const path = normalizePath(view.file.path)
+    if (this.editorDebounce) clearTimeout(this.editorDebounce)
+    this.editorDebounce = setTimeout(() => {
+      this.flushEditorToYText(editor, path)
+    }, 200)
+  }
+
+  private flushEditorToYText(editor: Editor, path: string) {
+    if (!this.filesMap || !this.ydoc) return
+    const content = editor.getValue()
+    const ytext = this.filesMap.get(path)
+    if (!ytext) return
+    if (ytext.toString() === content) return
+    this.ydoc.transact(() => {
+      ytext.delete(0, ytext.length)
+      ytext.insert(0, content)
+    }, 'vault-local')
+  }
+
+  // ── Misc ──────────────────────────────────────────────────────────────────
 
   private updateStatusBar(status: string) {
     if (!this.statusBarItem) return
@@ -485,7 +767,7 @@ class NNNSyncSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName('Document ID')
-      .setDesc('Logical document ID for this vault (e.g. "nnn/main"). See ADR-007 for multi-vault naming.')
+      .setDesc('Vault ID for this shared workspace (e.g. "nnn/main"). All users connecting to the same ID share one vault.')
       .addText(text => text
         .setPlaceholder('nnn/main')
         .setValue(this.plugin.settings.docId)
@@ -494,7 +776,6 @@ class NNNSyncSettingTab extends PluginSettingTab {
           await this.plugin.saveSettings()
         }))
 
-    // Session status
     const sessionDesc = isSessionValid(this.plugin.settings)
       ? `✅ Session active — expires ${new Date(this.plugin.settings.sessionExpiresAt).toLocaleString()}`
       : '⚠️ No active session — will authenticate on connect.'

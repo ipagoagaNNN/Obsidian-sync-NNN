@@ -1,6 +1,6 @@
 {
   "name": "nnn-hf-sync",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "NNN real-time vault sync via y-sweet on a public HF Space",
   "main": "main.js",
   "scripts": {
