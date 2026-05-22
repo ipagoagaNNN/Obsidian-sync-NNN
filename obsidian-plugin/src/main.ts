@@ -133,16 +133,21 @@ async function ensureParentDirs(vault: Vault, filePath: string): Promise<void> {
  *   **       recursive directory wildcard
  *   [chars]  character class
  *
- * If the pattern contains a literal regex metacharacter, it is escaped before
- * the glob → regex conversion so it cannot inject regex syntax.
+ * Both pattern and name are normalized to forward slashes and have any
+ * leading slash stripped before matching — admins sometimes type Windows-style
+ * backslashes (e.g. "TestDir2\new test 1.md") in the AclTab; the server
+ * normalizes on save as well, but doing it here makes the plugin tolerant
+ * of any stale rows that slipped through earlier server versions.
  */
 function globMatch(pattern: string, name: string): boolean {
-  const regex = '^' + pattern
+  const p = pattern.replace(/\\/g, '/').replace(/^\/+/, '')
+  const n = name.replace(/\\/g, '/').replace(/^\/+/, '')
+  const regex = '^' + p
     .replace(/[.+^${}()|[\]\\]/g, '\\$&')  // escape regex specials
     .replace(/\*/g, '[^/]*')                // * → [^/]*
     .replace(/\?/g, '[^/]')                 // ? → [^/]
     + '$'
-  try { return new RegExp(regex).test(name) }
+  try { return new RegExp(regex).test(n) }
   catch { return false }
 }
 
