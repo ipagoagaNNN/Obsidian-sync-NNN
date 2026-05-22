@@ -55,7 +55,7 @@ import * as Y from 'yjs'
 import { YSweetProvider } from '@y-sweet/client'
 import type { ClientToken } from '@y-sweet/sdk'
 
-const PLUGIN_VERSION = '1.4.0'
+const PLUGIN_VERSION = '1.5.0'
 
 // Pinned source for in-app updates (must match install-windows.ps1 / install-macos.sh).
 const PLUGIN_REPO_OWNER = 'ipagoagaNNN'
@@ -339,6 +339,128 @@ class PasswordChangeModal extends Modal {
   }
 }
 
+// ── Re-auth modal — Phase 6a (no stored password) ────────────────────────────
+//
+// Shown whenever the plugin needs to log in but the password isn't already
+// in memory. This is the ONLY place a password is collected from the user
+// outside of the temp-password first-login flow. The password is consumed
+// in a single /auth/login call and never persisted to disk.
+//
+// Triggers:
+//   - First time the user clicks Connect (no session yet)
+//   - Session token expires/invalidated and the plugin needs to reconnect
+//   - Username changed in settings; previous session no longer applies
+
+class ReauthModal extends Modal {
+  private username: string
+  private spaceUrl: string
+  private resolve!: (result: { sessionToken: string; expiresAt: string; password: string }) => void
+  private reject!: (reason: Error) => void
+
+  constructor(app: App, username: string, spaceUrl: string) {
+    super(app)
+    this.username = username
+    this.spaceUrl = spaceUrl
+  }
+
+  waitForResult(): Promise<{ sessionToken: string; expiresAt: string; password: string }> {
+    return new Promise((resolve, reject) => {
+      this.resolve = resolve
+      this.reject = reject
+      this.open()
+    })
+  }
+
+  onOpen() {
+    const { contentEl } = this
+    contentEl.empty()
+    contentEl.createEl('h2', { text: '🔐 Log in' })
+    contentEl.createEl('p', {
+      text: `Logging in as ${this.username}. Your password is only used to obtain a session token — it is never stored on disk by this plugin.`,
+      cls: 'nnn-modal-desc',
+    })
+
+    let password = ''
+    const errorEl = contentEl.createEl('p', { cls: 'nnn-modal-error' })
+    errorEl.style.color = 'var(--text-error, red)'
+    errorEl.style.minHeight = '1.2em'
+
+    new Setting(contentEl)
+      .setName('Password')
+      .addText(text => {
+        text.inputEl.type = 'password'
+        text.inputEl.autocomplete = 'current-password'
+        text.inputEl.focus()
+        text.onChange(v => { password = v })
+        // Enter submits
+        text.inputEl.addEventListener('keydown', e => {
+          if (e.key === 'Enter') {
+            e.preventDefault()
+            submitBtn.buttonEl.click()
+          }
+        })
+      })
+
+    const actions = new Setting(contentEl)
+    const submitBtn = actions
+      .addButton(btn => btn
+        .setButtonText('Log in')
+        .setCta()
+        .onClick(async () => {
+          errorEl.setText('')
+          if (!password) {
+            errorEl.setText('Enter your password.')
+            return
+          }
+          btn.setDisabled(true).setButtonText('Logging in…')
+          try {
+            const url = this.spaceUrl.replace(/\/$/, '') + '/auth/login'
+            const res = await fetch(url, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', 'X-Plugin-Version': PLUGIN_VERSION },
+              body: JSON.stringify({ username: this.username, password }),
+            })
+            if (res.status === 403) {
+              const body = await res.json().catch(() => ({}))
+              if (body.requiresPasswordChange) {
+                // Hand off to the password-change modal (chained flow).
+                this.close()
+                const changeModal = new PasswordChangeModal(this.app, this.username, password, this.spaceUrl)
+                const result = await changeModal.waitForResult()
+                this.resolve({ ...result, password: '' })
+                return
+              }
+            }
+            if (!res.ok) {
+              const text = await res.text().catch(() => res.statusText)
+              throw new Error(`Login failed (${res.status}): ${text}`)
+            }
+            const body = await res.json()
+            this.close()
+            this.resolve({
+              sessionToken: body.sessionToken,
+              expiresAt:    body.expiresAt,
+              password:     '', // we deliberately drop the password here
+            })
+          } catch (e) {
+            errorEl.setText((e as Error).message)
+            btn.setDisabled(false).setButtonText('Log in')
+          }
+        }))
+
+    actions.addButton(btn => btn
+      .setButtonText('Cancel')
+      .onClick(() => {
+        this.close()
+        this.reject(new Error('Login cancelled by user.'))
+      }))
+  }
+
+  onClose() {
+    this.contentEl.empty()
+  }
+}
+
 // ── Auth helpers ──────────────────────────────────────────────────────────────
 
 function isSessionValid(settings: NNNSyncSettings): boolean {
@@ -397,25 +519,22 @@ async function fetchClientToken(
 
   const ensureSession = async () => {
     if (isSessionValid(settings)) return
-    try {
-      const { sessionToken, expiresAt } = await login(settings)
-      settings.sessionToken = sessionToken
-      settings.sessionExpiresAt = expiresAt
-      await onSessionRefresh(sessionToken, expiresAt)
-    } catch (e) {
-      if (e instanceof LoginRequiresPasswordChange) {
-        const modal = new PasswordChangeModal(
-          app, settings.username, settings.password, settings.spaceUrl,
-        )
-        const { sessionToken, expiresAt } = await modal.waitForResult()
-        settings.sessionToken = sessionToken
-        settings.sessionExpiresAt = expiresAt
-        settings.password = ''
-        await onSessionRefresh(sessionToken, expiresAt)
-      } else {
-        throw e
-      }
+
+    // Phase 6a: never authenticate from settings.password. If there's a
+    // stale password on disk from a pre-v1.5.0 install, drop it before
+    // doing anything else.
+    if (settings.password) {
+      settings.password = ''
+      await onSessionRefresh(settings.sessionToken, settings.sessionExpiresAt)
     }
+
+    // No valid session and no in-memory password → ask the user.
+    const modal = new ReauthModal(app, settings.username, settings.spaceUrl)
+    const { sessionToken, expiresAt } = await modal.waitForResult()
+    settings.sessionToken = sessionToken
+    settings.sessionExpiresAt = expiresAt
+    settings.password = '' // belt-and-suspenders: ReauthModal already drops it
+    await onSessionRefresh(sessionToken, expiresAt)
   }
 
   await ensureSession()
@@ -532,10 +651,9 @@ export default class NNNSyncPlugin extends Plugin {
       new Notice('NNN Sync: configure username and document ID before connecting.')
       return
     }
-    if (!s.password && !isSessionValid(s)) {
-      new Notice('NNN Sync: enter your password (or reconnect to re-authenticate).')
-      return
-    }
+    // Phase 6a: no stored-password short-circuit any more. If the session
+    // is invalid the ReauthModal opens inside ensureSession() and prompts
+    // the user interactively. That's the only place a password is collected.
 
     this.updateStatusBar('connecting')
     new Notice('NNN Sync: connecting…')
@@ -1166,6 +1284,13 @@ export default class NNNSyncPlugin extends Plugin {
 
   async loadSettings() {
     this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData())
+    // Phase 6a migration: drop any password persisted by older plugin
+    // versions on the way in. From v1.5.0+ the password lives only in
+    // memory inside a single login() call and is dropped immediately.
+    if (this.settings.password) {
+      this.settings.password = ''
+      await this.saveSettings()
+    }
   }
 
   async saveSettings() {
@@ -1211,24 +1336,25 @@ class NNNSyncSettingTab extends PluginSettingTab {
         }))
 
     new Setting(containerEl)
-      .setName('Password')
+      .setName('Authentication')
       .setDesc(
         isSessionValid(this.plugin.settings)
-          ? '✅ Session active — password not needed until session expires.'
-          : 'Enter your password (or temp password if this is your first login).'
+          ? '✅ Session active — no login needed until session expires.'
+          : 'Click Connect (below) to log in. Your password is never stored on disk — it is used once to obtain a session token.'
       )
-      .addText(text => {
-        text.inputEl.type = 'password'
-        text.inputEl.autocomplete = 'current-password'
-        text
-          .setValue(this.plugin.settings.password)
-          .onChange(async (v) => {
-            this.plugin.settings.password = v
-            this.plugin.settings.sessionToken = ''
-            this.plugin.settings.sessionExpiresAt = ''
-            await this.plugin.saveSettings()
-          })
-      })
+      // No password field: Phase 6a removed plaintext storage. Login happens
+      // through the ReauthModal that pops up when you click Connect.
+      .addButton(btn => btn
+        .setButtonText(isSessionValid(this.plugin.settings) ? 'Re-authenticate' : 'Log in')
+        .onClick(async () => {
+          // Invalidate the current session and force a fresh login modal.
+          this.plugin.settings.sessionToken = ''
+          this.plugin.settings.sessionExpiresAt = ''
+          this.plugin.settings.password = ''
+          await this.plugin.saveSettings()
+          await this.plugin.startSync()
+          this.display() // re-render to update the button label
+        }))
 
     new Setting(containerEl)
       .setName('Document ID')
