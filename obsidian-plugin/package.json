@@ -12,7 +12,6 @@
     "yjs": "^13.6.30"
   },
   "devDependencies": {
-    "@esbuild/win32-x64": "^0.25.12",
     "@types/node": "^22.0.0",
     "esbuild": "^0.25.0",
     "obsidian": "latest",
