@@ -69,6 +69,10 @@ import { effectivePermission } from './acl'
 import { compareVersions, sha256Hex, fetchLatestRelease } from './updater'
 import { logout, fetchClientToken } from './auth/session'
 import { NNNSyncSettingTab } from './settings'
+import { PMClient } from './pm/api'
+import { PM_VIEW_TYPE, PMBoardView } from './pm/view'
+import { renderPMCodeBlock } from './pm/block'
+import { injectPMStyles, removePMStyles } from './pm/styles'
 
 // ── Plugin ────────────────────────────────────────────────────────────────────
 
@@ -127,12 +131,45 @@ export default class NNNSyncPlugin extends Plugin {
       callback: () => this.stopSync(),
     })
 
+    // ── NNN-PM (Phase 1) — issue tracker surface ──────────────────────────────
+    // The board talks to /pm/* with the same session token the sync engine
+    // obtains. It self-gates (clear message) when the session isn't active or
+    // the server hasn't enabled PM yet, so registering unconditionally is safe.
+    injectPMStyles()
+    this.registerView(PM_VIEW_TYPE, (leaf) => new PMBoardView(leaf, () => this.pmClient()))
+    this.registerMarkdownCodeBlockProcessor('nnn-pm', (source, el) => {
+      renderPMCodeBlock(this.app, () => this.pmClient(), source, el)
+    })
+    this.addCommand({
+      id: 'nnn-pm-open-board',
+      name: 'Open PM board',
+      callback: () => { void this.openPMBoard() },
+    })
+    this.addRibbonIcon('layout-grid', 'NNN-PM board', () => { void this.openPMBoard() })
+
     if (this.settings.enabled && this.settings.username && this.settings.docId) {
       setTimeout(() => this.startSync(), 3000)
     }
   }
 
+  /** Build a PMClient bound to the current settings (session token + space URL). */
+  pmClient(): PMClient {
+    return new PMClient(this.settings.spaceUrl, () => this.settings.sessionToken)
+  }
+
+  /** Open (or reveal) the PM board in a workspace tab. */
+  async openPMBoard() {
+    const { workspace } = this.app
+    let leaf = workspace.getLeavesOfType(PM_VIEW_TYPE)[0]
+    if (!leaf) {
+      leaf = workspace.getLeaf('tab')
+      await leaf.setViewState({ type: PM_VIEW_TYPE, active: true })
+    }
+    workspace.revealLeaf(leaf)
+  }
+
   onunload() {
+    removePMStyles()
     logout(this.settings)
     this.stopSync()
   }
