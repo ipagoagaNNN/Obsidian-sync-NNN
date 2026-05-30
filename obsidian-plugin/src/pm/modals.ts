@@ -3,7 +3,7 @@
 
 import { App, Modal, Notice, Setting } from 'obsidian'
 import { PMClient, PMError } from './api'
-import type { PMIssueDetail, PMMeta } from './types'
+import type { PMComment, PMIssueDetail, PMMeta } from './types'
 
 function errMsg(e: unknown): string {
   return e instanceof PMError ? e.message : e instanceof Error ? e.message : String(e)
@@ -200,7 +200,68 @@ export class IssueDetailModal extends Modal {
       )
       .addButton(b => b.setButtonText('Close').onClick(() => this.close()))
 
+    void this.renderComments(contentEl, issue.id)
     void this.renderActivity(contentEl, issue.id)
+  }
+
+  // Comment thread + composer (Phase 2). Bodies are rendered via setText
+  // (textContent), so any HTML or @mention markup is shown as literal text —
+  // the stored-XSS guard. The server fans out @mention + assignee notifications.
+  private async renderComments(parent: HTMLElement, issueId: number) {
+    const wrap = parent.createDiv({ cls: 'nnn-pm-comments' })
+    wrap.createEl('h4', { text: 'Comments' })
+    const listEl = wrap.createDiv({ cls: 'nnn-pm-comment-list' })
+
+    const renderList = (items: PMComment[]) => {
+      listEl.empty()
+      if (!items.length) {
+        listEl.createEl('p', { text: 'No comments yet.', cls: 'nnn-pm-loading' })
+        return
+      }
+      for (const c of items) {
+        const row = listEl.createDiv({ cls: 'nnn-pm-comment' })
+        const who = c.author ?? 'someone'
+        const when = new Date(c.createdAt).toLocaleString()
+        row
+          .createDiv({ cls: 'nnn-pm-comment-meta' })
+          .setText(`${who} · ${when}${c.edited ? ' · edited' : ''}`)
+        row.createDiv({ cls: 'nnn-pm-comment-body' }).setText(c.body)
+      }
+    }
+
+    try {
+      renderList(await this.client.comments(issueId))
+    } catch (e) {
+      listEl.createEl('p', { text: errMsg(e), cls: 'nnn-pm-error' })
+    }
+
+    // Composer.
+    const composer = wrap.createDiv({ cls: 'nnn-pm-comment-composer' })
+    const ta = composer.createEl('textarea')
+    ta.rows = 3
+    ta.placeholder = 'Add a comment… use @username to notify someone'
+    ta.style.width = '100%'
+    const cErr = composer.createEl('p', { cls: 'nnn-pm-error' })
+    cErr.style.minHeight = '1.2em'
+    const sendBtn = composer.createEl('button', { text: 'Comment' })
+    sendBtn.onclick = async () => {
+      const body = ta.value.trim()
+      if (!body) {
+        cErr.setText('Comment cannot be empty.')
+        return
+      }
+      sendBtn.disabled = true
+      cErr.setText('')
+      try {
+        await this.client.createComment(issueId, body)
+        ta.value = ''
+        renderList(await this.client.comments(issueId))
+      } catch (e) {
+        cErr.setText(errMsg(e))
+      } finally {
+        sendBtn.disabled = false
+      }
+    }
   }
 
   private async renderActivity(parent: HTMLElement, issueId: number) {

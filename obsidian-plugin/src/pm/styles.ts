@@ -32,6 +32,30 @@ const PM_CSS = `
 
 .nnn-pm-activity ul { padding-left: 1.1em; margin: 4px 0; }
 .nnn-pm-activity li { font-size: 0.82rem; color: var(--text-muted); }
+
+.nnn-pm-comments { margin-top: 12px; }
+.nnn-pm-comment {
+  padding: 6px 0;
+  border-top: 1px solid var(--background-modifier-border, rgba(0,0,0,0.1));
+}
+.nnn-pm-comment-meta { font-size: 0.78rem; color: var(--text-muted); margin-bottom: 2px; }
+.nnn-pm-comment-body { white-space: pre-wrap; word-break: break-word; }
+.nnn-pm-comment-composer { margin-top: 8px; }
+.nnn-pm-comment-composer button { margin-top: 6px; cursor: pointer; }
+
+.nnn-pm-notif-toolbar { margin-bottom: 8px; }
+.nnn-pm-notif-toolbar button { cursor: pointer; }
+.nnn-pm-notif {
+  padding: 6px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  border-top: 1px solid var(--background-modifier-border, rgba(0,0,0,0.1));
+}
+.nnn-pm-notif:hover { background: var(--background-modifier-hover, rgba(0,0,0,0.05)); }
+.nnn-pm-notif-unread { border-left: 3px solid var(--interactive-accent, #7c6cf0); }
+.nnn-pm-notif-text { font-size: 0.9rem; }
+.nnn-pm-notif-unread .nnn-pm-notif-text { font-weight: 600; }
+.nnn-pm-notif-meta { font-size: 0.75rem; color: var(--text-muted); }
 `
 
 /** Inject the board stylesheet once (idempotent). */

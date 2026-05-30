@@ -73,6 +73,7 @@ import { PMClient } from './pm/api'
 import { PM_VIEW_TYPE, PMBoardView } from './pm/view'
 import { renderPMCodeBlock } from './pm/block'
 import { injectPMStyles, removePMStyles } from './pm/styles'
+import { NotificationsModal } from './pm/notifications'
 
 // ── Plugin ────────────────────────────────────────────────────────────────────
 
@@ -82,6 +83,8 @@ export default class NNNSyncPlugin extends Plugin {
   private ydoc: Y.Doc | null = null
   private provider: YSweetProvider | null = null
   private statusBarItem: HTMLElement | null = null
+  // PM notifications unread badge (Phase 2) — separate from the sync status item.
+  private pmNotifStatusBar: HTMLElement | null = null
 
   // Vault sync state
   private filesMap: Y.Map<Y.Text> | null = null
@@ -147,8 +150,56 @@ export default class NNNSyncPlugin extends Plugin {
     })
     this.addRibbonIcon('layout-grid', 'NNN-PM board', () => { void this.openPMBoard() })
 
+    // PM notifications: a clickable unread badge in the status bar, polled on a
+    // 60 s interval. The COUNT endpoint is server-cached, so polling never pins
+    // Neon awake (ADR-013). Hidden when there's nothing unread.
+    this.pmNotifStatusBar = this.addStatusBarItem()
+    this.pmNotifStatusBar.style.cursor = 'pointer'
+    this.pmNotifStatusBar.addEventListener('click', () => this.openPMNotifications())
+    this.updatePMNotifBadge(0)
+    this.addCommand({
+      id: 'nnn-pm-notifications',
+      name: 'Open PM notifications',
+      callback: () => this.openPMNotifications(),
+    })
+    this.registerInterval(window.setInterval(() => { void this.refreshPMNotifBadge() }, 60_000))
+    setTimeout(() => { void this.refreshPMNotifBadge() }, 5000)
+
     if (this.settings.enabled && this.settings.username && this.settings.docId) {
       setTimeout(() => this.startSync(), 3000)
+    }
+  }
+
+  /** Open the notifications inbox; refreshes the badge on any read-state change. */
+  openPMNotifications() {
+    new NotificationsModal(this.app, this.pmClient(), () => { void this.refreshPMNotifBadge() }).open()
+  }
+
+  /** Poll the server's (cached) unread count and repaint the badge. */
+  async refreshPMNotifBadge() {
+    if (!this.settings.sessionToken) {
+      this.updatePMNotifBadge(0)
+      return
+    }
+    try {
+      const r = await this.pmClient().unreadCount()
+      this.updatePMNotifBadge(r.unread)
+    } catch {
+      // PM disabled (503), offline, or session expired — hide rather than nag.
+      this.updatePMNotifBadge(0)
+    }
+  }
+
+  private updatePMNotifBadge(n: number) {
+    const el = this.pmNotifStatusBar
+    if (!el) return
+    if (n > 0) {
+      el.setText(`🔔 ${n}`)
+      el.title = `${n} unread PM notification${n === 1 ? '' : 's'}`
+      el.style.display = ''
+    } else {
+      el.setText('')
+      el.style.display = 'none'
     }
   }
 

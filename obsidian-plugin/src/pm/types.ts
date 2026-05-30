@@ -74,3 +74,27 @@ export interface PMActivityEntry {
   detail?: unknown
   createdAt: string
 }
+
+/** One comment from GET /pm/issues/:id/comments (Phase 2). */
+export interface PMComment {
+  id: number
+  authorId?: number | null
+  author?: string | null
+  body: string
+  edited: boolean
+  createdAt: string
+  updatedAt: string
+}
+
+/** One in-app notification from GET /pm/notifications (Phase 2). */
+export interface PMNotification {
+  id: number
+  kind: string // mention | assigned | commented
+  issueId?: number | null
+  issueRef?: string // "ENG-42" when resolvable
+  commentId?: number | null
+  actorId?: number | null
+  actor?: string | null
+  read: boolean
+  createdAt: string
+}

@@ -11,8 +11,10 @@ import { PLUGIN_VERSION } from '../version'
 import type {
   PMActivityEntry,
   PMBoard,
+  PMComment,
   PMIssueDetail,
   PMMeta,
+  PMNotification,
   PMProject,
 } from './types'
 
@@ -109,5 +111,31 @@ export class PMClient {
   }
   transition(id: number, to: string): Promise<{ id: number; status: string }> {
     return this.req('POST', `/pm/issues/${id}/transition`, { to })
+  }
+
+  // ── comments (Phase 2) ───────────────────────────────────────────────────────
+  comments(issueId: number): Promise<PMComment[]> {
+    return this.req<PMComment[]>('GET', `/pm/issues/${issueId}/comments`)
+  }
+  createComment(issueId: number, body: string): Promise<PMComment> {
+    return this.req<PMComment>('POST', `/pm/issues/${issueId}/comments`, { body })
+  }
+  editComment(issueId: number, commentId: number, body: string): Promise<void> {
+    return this.req<void>('PATCH', `/pm/issues/${issueId}/comments/${commentId}`, { body })
+  }
+  deleteComment(issueId: number, commentId: number): Promise<void> {
+    return this.req<void>('DELETE', `/pm/issues/${issueId}/comments/${commentId}`)
+  }
+
+  // ── notifications (Phase 2; polled, unread count is server-cached) ───────────
+  notifications(unreadOnly = false): Promise<PMNotification[]> {
+    const q = unreadOnly ? '?unread=true' : ''
+    return this.req<PMNotification[]>('GET', `/pm/notifications${q}`)
+  }
+  unreadCount(): Promise<{ unread: number; cached: boolean }> {
+    return this.req('GET', '/pm/notifications/unread-count')
+  }
+  markRead(opts: { ids?: number[]; all?: boolean }): Promise<{ ok: boolean; unread?: number }> {
+    return this.req('POST', '/pm/notifications/read', opts)
   }
 }
