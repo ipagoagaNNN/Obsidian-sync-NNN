@@ -1,15 +1,22 @@
-// PMBoardView — a full-tab ItemView hosting the kanban board with a project
-// picker. Opened via the ribbon icon or the "Open PM board" command.
+// PMBoardView — the full-tab NNN-PM workspace host (ADR-014).
+//
+// Not file-backed (an ItemView), so it's the right home for a stateful, multi-
+// view workspace. The host is thin: a VIEW SELECTOR (from the registry) + a
+// MULTI-SELECT project scope picker, then it resolves the active view and calls
+// render() into the body. All real rendering lives in the view modules.
 
 import { ItemView, WorkspaceLeaf } from 'obsidian'
 import { PMClient, PMError } from './api'
-import { renderBoard } from './board'
+import { pmViews, type Scope } from './registry'
 import type { PMProject } from './types'
 
 export const PM_VIEW_TYPE = 'nnn-pm-board'
 
 export class PMBoardView extends ItemView {
-  private projectKey = ''
+  // NB: named `pmScope`, not `scope` — Obsidian's View base reserves `scope`
+  // for its keyboard-event Scope. This is our data-plane scope (registry.ts).
+  private pmScope: Scope = { projects: [], plane: 'pm' }
+  private viewId = 'board'
 
   constructor(
     leaf: WorkspaceLeaf,
@@ -22,7 +29,7 @@ export class PMBoardView extends ItemView {
     return PM_VIEW_TYPE
   }
   getDisplayText(): string {
-    return 'NNN-PM board'
+    return 'NNN-PM'
   }
   getIcon(): string {
     return 'layout-grid'
@@ -31,7 +38,6 @@ export class PMBoardView extends ItemView {
   async onOpen() {
     await this.renderShell()
   }
-
   async onClose() {
     this.contentEl.empty()
   }
@@ -41,43 +47,91 @@ export class PMBoardView extends ItemView {
     contentEl.empty()
     contentEl.addClass('nnn-pm-view')
 
-    const picker = contentEl.createDiv({ cls: 'nnn-pm-picker' })
-    picker.style.marginBottom = '10px'
-    picker.createSpan({ text: 'Project: ' })
-    const select = picker.createEl('select')
-    const boardHost = contentEl.createDiv({ cls: 'nnn-pm-view-host' })
+    const bar = contentEl.createDiv({ cls: 'nnn-pm-host-bar' })
+    const body = contentEl.createDiv({ cls: 'nnn-pm-view-host' })
 
     const client = this.getClient()
     let projects: PMProject[] = []
     try {
       projects = await client.projects()
     } catch (e) {
-      boardHost.createEl('p', {
+      body.createEl('p', {
         text: `NNN-PM: ${e instanceof PMError ? e.message : String(e)}`,
         cls: 'nnn-pm-error',
       })
       return
     }
     if (!projects.length) {
-      boardHost.createEl('p', {
-        text: 'You are not a member of any project yet — ask an admin to add you.',
+      body.createEl('p', {
+        text: 'You are not a member of any project yet — ask an admin to add you (or set your department).',
       })
       return
     }
 
-    for (const p of projects) {
-      select.createEl('option', { text: `${p.key} — ${p.name}`, value: p.key })
-    }
-    if (!this.projectKey) this.projectKey = projects[0].key
-    select.value = this.projectKey
+    // Default scope: keep any still-valid prior selection, else the first project.
+    const allowed = new Set(projects.map(p => p.key))
+    this.pmScope.projects = this.pmScope.projects.filter(k => allowed.has(k))
+    if (!this.pmScope.projects.length) this.pmScope.projects = [projects[0].key]
 
     const paint = () => {
-      void renderBoard(this.app, client, boardHost, { projectKey: this.projectKey })
+      const view = pmViews.get(this.viewId) ?? pmViews.list()[0]
+      if (!view) {
+        body.empty()
+        body.createEl('p', { text: 'No NNN-PM views registered.', cls: 'nnn-pm-error' })
+        return
+      }
+      this.viewId = view.id
+      void view.render(body, {
+        app: this.app,
+        client,
+        scope: this.pmScope,
+        reload: paint,
+      })
     }
-    select.onchange = () => {
-      this.projectKey = select.value
+
+    // ── View selector ─────────────────────────────────────────────────────────
+    const viewWrap = bar.createDiv({ cls: 'nnn-pm-host-views' })
+    viewWrap.createSpan({ cls: 'nnn-pm-host-label', text: 'View' })
+    const viewSel = viewWrap.createEl('select')
+    for (const v of pmViews.list()) {
+      const o = viewSel.createEl('option', { text: v.label })
+      o.value = v.id
+    }
+    viewSel.value = this.viewId
+    viewSel.onchange = () => {
+      this.viewId = viewSel.value
       paint()
     }
+
+    // ── Scope multi-select (toggle pills) ───────────────────────────────────────
+    const scopeWrap = bar.createDiv({ cls: 'nnn-pm-host-scope' })
+    scopeWrap.createSpan({ cls: 'nnn-pm-host-label', text: 'Scope' })
+    const repaintPills = () => {
+      pills.empty()
+      for (const p of projects) {
+        const on = this.pmScope.projects.includes(p.key)
+        const pill = pills.createEl('button', {
+          text: p.key,
+          cls: on ? 'nnn-pm-scope-pill nnn-pm-scope-on' : 'nnn-pm-scope-pill',
+        })
+        pill.title = p.name
+        pill.onclick = () => {
+          if (on) {
+            // Don't allow emptying the scope to nothing.
+            if (this.pmScope.projects.length > 1) {
+              this.pmScope.projects = this.pmScope.projects.filter(k => k !== p.key)
+            }
+          } else {
+            this.pmScope.projects = [...this.pmScope.projects, p.key]
+          }
+          repaintPills()
+          paint()
+        }
+      }
+    }
+    const pills = scopeWrap.createDiv({ cls: 'nnn-pm-scope-pills' })
+    repaintPills()
+
     paint()
   }
 }

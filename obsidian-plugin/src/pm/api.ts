@@ -10,10 +10,20 @@
 import { PLUGIN_VERSION } from '../version'
 import type {
   PMActivityEntry,
+  PMAnalytics,
+  PMAssignee,
   PMBoard,
   PMComment,
+  PMCycle,
+  PMEpic,
   PMIssueDetail,
+  PMIssueFilters,
+  PMIssueLink,
+  PMIssueSummary,
+  PMLabel,
+  PMMember,
   PMMeta,
+  PMMilestone,
   PMNotification,
   PMProject,
 } from './types'
@@ -41,6 +51,11 @@ export interface PatchIssueInput {
   description?: string
   priority?: string
   assigneeId?: number // 0 clears the assignee
+  parentId?: number // 0 clears the parent; >0 sets (same-project, no cycle)
+  epicId?: number // 0 clears the epic; >0 sets (same-project)
+  cycleId?: number // 0 clears the cycle; >0 sets (same-project)
+  milestoneId?: number // v2: 0 clears the milestone; >0 sets (same-project)
+  assignedDepartment?: string // v2: "" clears the department queue; else sets it
 }
 
 export class PMClient {
@@ -118,6 +133,24 @@ export class PMClient {
   board(projectKey: string): Promise<PMBoard> {
     return this.req<PMBoard>('GET', `/pm/projects/${encodeURIComponent(projectKey)}/board`)
   }
+  // Filtered, paginated issue list (50/page) — the board endpoint takes no
+  // filters, so the board's filter bar pages this and groups the result by
+  // status. Honors the s32 injection-safe filter compiler (every value bound $N).
+  listIssues(opts: { project: string; page?: number } & PMIssueFilters): Promise<PMIssueSummary[]> {
+    const p = new URLSearchParams({ project: opts.project })
+    if (opts.page && opts.page > 1) p.set('page', String(opts.page))
+    if (opts.q) p.set('q', opts.q)
+    if (opts.status) p.set('status', opts.status)
+    if (opts.priority) p.set('priority', opts.priority)
+    if (opts.assignee) p.set('assignee', opts.assignee)
+    if (opts.label) p.set('label', opts.label)
+    if (opts.epic) p.set('epic', opts.epic)
+    if (opts.cycle) p.set('cycle', opts.cycle)
+    return this.req<PMIssueSummary[]>('GET', `/pm/issues?${p.toString()}`)
+  }
+  members(projectKey: string): Promise<PMMember[]> {
+    return this.req<PMMember[]>('GET', `/pm/projects/${encodeURIComponent(projectKey)}/members`)
+  }
   getIssue(id: number): Promise<PMIssueDetail> {
     return this.req<PMIssueDetail>('GET', `/pm/issues/${id}`)
   }
@@ -169,5 +202,95 @@ export class PMClient {
     const p = new URLSearchParams({ format })
     if (opts.project) p.set('project', opts.project)
     return this.reqRaw(`/pm/issues/export?${p.toString()}`)
+  }
+
+  // ── labels (layer-2, migration 011) ──────────────────────────────────────────
+  // Project-level: list / create (manage) / delete (manage).
+  private projPath(key: string): string {
+    return `/pm/projects/${encodeURIComponent(key)}`
+  }
+  labels(projectKey: string): Promise<PMLabel[]> {
+    return this.req<PMLabel[]>('GET', `${this.projPath(projectKey)}/labels`)
+  }
+  createLabel(projectKey: string, input: { name: string; color?: string }): Promise<PMLabel> {
+    return this.req<PMLabel>('POST', `${this.projPath(projectKey)}/labels`, input)
+  }
+  deleteLabel(projectKey: string, labelId: number): Promise<void> {
+    return this.req<void>('DELETE', `${this.projPath(projectKey)}/labels/${labelId}`)
+  }
+  // Per-issue: list / attach (write) / detach (write).
+  issueLabels(issueId: number): Promise<PMLabel[]> {
+    return this.req<PMLabel[]>('GET', `/pm/issues/${issueId}/labels`)
+  }
+  attachLabel(issueId: number, labelId: number): Promise<void> {
+    return this.req<void>('POST', `/pm/issues/${issueId}/labels`, { labelId })
+  }
+  detachLabel(issueId: number, labelId: number): Promise<void> {
+    return this.req<void>('DELETE', `/pm/issues/${issueId}/labels/${labelId}`)
+  }
+
+  // ── epics (layer-2) ──────────────────────────────────────────────────────────
+  epics(projectKey: string): Promise<PMEpic[]> {
+    return this.req<PMEpic[]>('GET', `${this.projPath(projectKey)}/epics`)
+  }
+  createEpic(projectKey: string, input: { name: string; description?: string }): Promise<PMEpic> {
+    return this.req<PMEpic>('POST', `${this.projPath(projectKey)}/epics`, input)
+  }
+
+  // ── cycles (layer-2) ─────────────────────────────────────────────────────────
+  cycles(projectKey: string): Promise<PMCycle[]> {
+    return this.req<PMCycle[]>('GET', `${this.projPath(projectKey)}/cycles`)
+  }
+  createCycle(
+    projectKey: string,
+    input: { name: string; startsOn?: string | null; endsOn?: string | null },
+  ): Promise<PMCycle> {
+    return this.req<PMCycle>('POST', `${this.projPath(projectKey)}/cycles`, input)
+  }
+
+  // ── sub-issues (layer-2) ─────────────────────────────────────────────────────
+  children(issueId: number): Promise<PMIssueSummary[]> {
+    return this.req<PMIssueSummary[]>('GET', `/pm/issues/${issueId}/children`)
+  }
+
+  // ── multi-assignee + per-user status (v2, migration 012) ─────────────────────
+  assignees(issueId: number): Promise<PMAssignee[]> {
+    return this.req<PMAssignee[]>('GET', `/pm/issues/${issueId}/assignees`)
+  }
+  addAssignee(issueId: number, userId: number, status?: string): Promise<void> {
+    return this.req<void>('POST', `/pm/issues/${issueId}/assignees`, { userId, status })
+  }
+  setAssigneeStatus(issueId: number, userId: number, status: string): Promise<void> {
+    return this.req<void>('PATCH', `/pm/issues/${issueId}/assignees/${userId}`, { status })
+  }
+  removeAssignee(issueId: number, userId: number): Promise<void> {
+    return this.req<void>('DELETE', `/pm/issues/${issueId}/assignees/${userId}`)
+  }
+
+  // ── milestones (v2) ──────────────────────────────────────────────────────────
+  milestones(projectKey: string): Promise<PMMilestone[]> {
+    return this.req<PMMilestone[]>('GET', `${this.projPath(projectKey)}/milestones`)
+  }
+  createMilestone(projectKey: string, input: { name: string; dueOn?: string | null }): Promise<PMMilestone> {
+    return this.req<PMMilestone>('POST', `${this.projPath(projectKey)}/milestones`, input)
+  }
+  deleteMilestone(projectKey: string, milestoneId: number): Promise<void> {
+    return this.req<void>('DELETE', `${this.projPath(projectKey)}/milestones/${milestoneId}`)
+  }
+
+  // ── issue ↔ note links (v2) ──────────────────────────────────────────────────
+  links(issueId: number): Promise<PMIssueLink[]> {
+    return this.req<PMIssueLink[]>('GET', `/pm/issues/${issueId}/links`)
+  }
+  addLink(issueId: number, targetPath: string, kind = 'note'): Promise<PMIssueLink> {
+    return this.req<PMIssueLink>('POST', `/pm/issues/${issueId}/links`, { targetPath, kind })
+  }
+  deleteLink(issueId: number, linkId: number): Promise<void> {
+    return this.req<void>('DELETE', `/pm/issues/${issueId}/links/${linkId}`)
+  }
+
+  // ── analytics (Phase 3, on-demand) ───────────────────────────────────────────
+  analytics(projectKey: string): Promise<PMAnalytics> {
+    return this.req<PMAnalytics>('GET', `${this.projPath(projectKey)}/analytics`)
   }
 }

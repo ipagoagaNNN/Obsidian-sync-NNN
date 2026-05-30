@@ -72,6 +72,7 @@ import { NNNSyncSettingTab } from './settings'
 import { PMClient } from './pm/api'
 import { PM_VIEW_TYPE, PMBoardView } from './pm/view'
 import { renderPMCodeBlock } from './pm/block'
+import { registerBuiltinViews } from './pm/views'
 import { injectPMStyles, removePMStyles } from './pm/styles'
 import { NotificationsModal } from './pm/notifications'
 
@@ -139,6 +140,7 @@ export default class NNNSyncPlugin extends Plugin {
     // obtains. It self-gates (clear message) when the session isn't active or
     // the server hasn't enabled PM yet, so registering unconditionally is safe.
     injectPMStyles()
+    registerBuiltinViews() // populate the view registry (board; more in later phases)
     this.registerView(PM_VIEW_TYPE, (leaf) => new PMBoardView(leaf, () => this.pmClient()))
     this.registerMarkdownCodeBlockProcessor('nnn-pm', (source, el) => {
       renderPMCodeBlock(this.app, () => this.pmClient(), source, el)

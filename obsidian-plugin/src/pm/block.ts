@@ -1,17 +1,18 @@
-// Markdown code-block processor for ```nnn-pm fences. Lets a department note
-// embed a live board:
+// Modular code-block processor for ```nnn-pm fences (ADR-014). A note embeds any
+// registered view, scoped to one or more projects:
 //
 //   ```nnn-pm
-//   project: ENG
-//   view: board
+//   view: gantt          # optional; defaults to 'board'
+//   project: ENG         # or: projects: ENG, MKT
 //   ```
 //
-// Phase 1 supports the `board` view only; `view:` is parsed but currently
-// always renders the board (table/cards are a later phase).
+// Backward-compatible: an old block with just `project: ENG` still renders the
+// board. The `view:` line selects a registry entry; everything else is the same
+// resolve → render path the full-tab host uses.
 
 import { App } from 'obsidian'
 import type { PMClient } from './api'
-import { renderBoard } from './board'
+import { pmViews, type Scope } from './registry'
 
 export function renderPMCodeBlock(
   app: App,
@@ -20,15 +21,45 @@ export function renderPMCodeBlock(
   el: HTMLElement,
 ): void {
   const cfg = parseConfig(source)
-  const projectKey = cfg.project
-  if (!projectKey) {
+  const projects = parseProjects(cfg)
+  if (!projects.length) {
     el.createEl('p', {
-      text: 'nnn-pm: missing `project: <KEY>` (e.g. "project: ENG")',
+      text: 'nnn-pm: missing `project: <KEY>` (or `projects: ENG, MKT`)',
       cls: 'nnn-pm-error',
     })
     return
   }
-  void renderBoard(app, getClient(), el, { projectKey })
+  const viewId = (cfg.view || 'board').trim().toLowerCase()
+  const view = pmViews.get(viewId)
+  if (!view) {
+    el.createEl('p', {
+      text: `nnn-pm: unknown view "${viewId}" — available: ${pmViews
+        .list()
+        .map(v => v.id)
+        .join(', ')}`,
+      cls: 'nnn-pm-error',
+    })
+    return
+  }
+  const scope: Scope = { projects, plane: 'pm' }
+  void view.render(el, {
+    app,
+    client: getClient(),
+    scope,
+    reload: () => renderPMCodeBlock(app, getClient, source, el),
+  })
+}
+
+/** Project keys from `projects: A, B` (preferred) or a single `project: A`. */
+function parseProjects(cfg: Record<string, string>): string[] {
+  if (cfg.projects) {
+    return cfg.projects
+      .split(',')
+      .map(s => s.trim().toUpperCase())
+      .filter(Boolean)
+  }
+  if (cfg.project) return [cfg.project.trim().toUpperCase()]
+  return []
 }
 
 // parseConfig reads simple `key: value` lines (comments with # ignored).
