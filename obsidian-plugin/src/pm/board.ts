@@ -6,7 +6,7 @@
 // paintBoard() draws synchronously. Any mutation (create / edit / drop) calls
 // reload() which re-runs renderBoard — simple and correct for an MVP at 60 users.
 
-import { App, Notice } from 'obsidian'
+import { App, Notice, TFile } from 'obsidian'
 import { PMClient, PMError } from './api'
 import type { PMBoard, PMMeta } from './types'
 import { CreateIssueModal, IssueDetailModal } from './modals'
@@ -62,6 +62,25 @@ function paintBoard(
   newBtn.onclick = () => new CreateIssueModal(app, client, meta, opts.projectKey, reload).open()
   const refreshBtn = bar.createEl('button', { text: '↻ Refresh' })
   refreshBtn.onclick = reload
+  const exportBtn = bar.createEl('button', { text: '⬇ Export CSV' })
+  exportBtn.onclick = async () => {
+    exportBtn.disabled = true
+    try {
+      const csv = await client.exportIssues('csv', { project: opts.projectKey })
+      const fname = `NNN-PM Export - ${opts.projectKey}.csv`
+      const existing = app.vault.getAbstractFileByPath(fname)
+      if (existing instanceof TFile) {
+        await app.vault.modify(existing, csv)
+      } else {
+        await app.vault.create(fname, csv)
+      }
+      new Notice(`Exported ${opts.projectKey} issues → ${fname}`)
+    } catch (e) {
+      new Notice(`NNN-PM export: ${errMsg(e)}`)
+    } finally {
+      exportBtn.disabled = false
+    }
+  }
 
   // Columns
   const cols = container.createDiv({ cls: 'nnn-pm-columns' })

@@ -85,6 +85,29 @@ export class PMClient {
     return (text ? JSON.parse(text) : (undefined as T)) as T
   }
 
+  // Raw-text GET (no JSON.parse) for endpoints that return CSV/plain bodies.
+  // Shares req()'s auth + error mapping.
+  private async reqRaw(path: string): Promise<string> {
+    const token = this.getToken()
+    if (!token) {
+      throw new PMError(401, 'Not connected — click Connect (sync) to start a session first.')
+    }
+    const res = await fetch(this.base() + path, {
+      headers: { Authorization: `Bearer ${token}`, 'X-Plugin-Version': PLUGIN_VERSION },
+    })
+    const text = await res.text()
+    if (!res.ok) {
+      if (res.status === 401) {
+        throw new PMError(401, 'Session expired — click Connect (sync) to sign in again.')
+      }
+      if (res.status === 503) {
+        throw new PMError(503, 'NNN-PM is not enabled on the server yet (pm schema pending).')
+      }
+      throw new PMError(res.status, text || res.statusText)
+    }
+    return text
+  }
+
   // ── reads ──────────────────────────────────────────────────────────────────
   meta(): Promise<PMMeta> {
     return this.req<PMMeta>('GET', '/pm/meta')
@@ -137,5 +160,14 @@ export class PMClient {
   }
   markRead(opts: { ids?: number[]; all?: boolean }): Promise<{ ok: boolean; unread?: number }> {
     return this.req('POST', '/pm/notifications/read', opts)
+  }
+
+  // ── export (Phase 2) ─────────────────────────────────────────────────────────
+  // Returns the raw CSV or JSON body for the caller's visible issues (optionally
+  // scoped to one project), honoring the same row-filter the list endpoint uses.
+  exportIssues(format: 'csv' | 'json', opts: { project?: string } = {}): Promise<string> {
+    const p = new URLSearchParams({ format })
+    if (opts.project) p.set('project', opts.project)
+    return this.reqRaw(`/pm/issues/export?${p.toString()}`)
   }
 }
