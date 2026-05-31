@@ -151,6 +151,18 @@ export class PMClient {
   members(projectKey: string): Promise<PMMember[]> {
     return this.req<PMMember[]>('GET', `/pm/projects/${encodeURIComponent(projectKey)}/members`)
   }
+  addMember(
+    projectKey: string,
+    input: { username?: string; userId?: number; role?: string },
+  ): Promise<void> {
+    return this.req<void>('POST', `/pm/projects/${encodeURIComponent(projectKey)}/members`, input)
+  }
+  removeMember(projectKey: string, userId: number): Promise<void> {
+    return this.req<void>(
+      'DELETE',
+      `/pm/projects/${encodeURIComponent(projectKey)}/members/${userId}`,
+    )
+  }
   getIssue(id: number): Promise<PMIssueDetail> {
     return this.req<PMIssueDetail>('GET', `/pm/issues/${id}`)
   }
@@ -271,8 +283,18 @@ export class PMClient {
   milestones(projectKey: string): Promise<PMMilestone[]> {
     return this.req<PMMilestone[]>('GET', `${this.projPath(projectKey)}/milestones`)
   }
-  createMilestone(projectKey: string, input: { name: string; dueOn?: string | null }): Promise<PMMilestone> {
+  createMilestone(
+    projectKey: string,
+    input: { name: string; dueOn?: string | null; goal?: string | null },
+  ): Promise<PMMilestone> {
     return this.req<PMMilestone>('POST', `${this.projPath(projectKey)}/milestones`, input)
+  }
+  updateMilestone(
+    projectKey: string,
+    milestoneId: number,
+    input: { name?: string; dueOn?: string | null; status?: string; goal?: string | null },
+  ): Promise<void> {
+    return this.req<void>('PATCH', `${this.projPath(projectKey)}/milestones/${milestoneId}`, input)
   }
   deleteMilestone(projectKey: string, milestoneId: number): Promise<void> {
     return this.req<void>('DELETE', `${this.projPath(projectKey)}/milestones/${milestoneId}`)
@@ -282,11 +304,30 @@ export class PMClient {
   links(issueId: number): Promise<PMIssueLink[]> {
     return this.req<PMIssueLink[]>('GET', `/pm/issues/${issueId}/links`)
   }
-  addLink(issueId: number, targetPath: string, kind = 'note'): Promise<PMIssueLink> {
-    return this.req<PMIssueLink>('POST', `/pm/issues/${issueId}/links`, { targetPath, kind })
+  addLink(issueId: number, targetPath: string, kind = 'note', relation?: string): Promise<PMIssueLink> {
+    return this.req<PMIssueLink>('POST', `/pm/issues/${issueId}/links`, { targetPath, kind, relation })
   }
   deleteLink(issueId: number, linkId: number): Promise<void> {
     return this.req<void>('DELETE', `/pm/issues/${issueId}/links/${linkId}`)
+  }
+
+  // ── v3: identity, assignable users, multi-department queue ───────────────────
+  me(): Promise<{ username: string; role: string; department: string; isManagement: boolean }> {
+    return this.req('GET', '/pm/me')
+  }
+  /** All active users (+ department) for the assignee picker — assignment accepts
+   *  any active user, so this is broader than project members. */
+  assignable(projectKey: string): Promise<{ userId: number; username: string; department: string }[]> {
+    return this.req('GET', `${this.projPath(projectKey)}/assignable`)
+  }
+  issueDepartments(issueId: number): Promise<string[]> {
+    return this.req<string[]>('GET', `/pm/issues/${issueId}/departments`)
+  }
+  addIssueDepartment(issueId: number, department: string): Promise<void> {
+    return this.req<void>('POST', `/pm/issues/${issueId}/departments`, { department })
+  }
+  removeIssueDepartment(issueId: number, department: string): Promise<void> {
+    return this.req<void>('DELETE', `/pm/issues/${issueId}/departments/${encodeURIComponent(department)}`)
   }
 
   // ── analytics (Phase 3, on-demand) ───────────────────────────────────────────

@@ -109,6 +109,7 @@ export interface PMMilestone {
   name: string
   dueOn?: string | null
   status: string // open | done | cancelled
+  goal?: string | null // v3: free-text target / definition of done
 }
 
 /** One assignee on an issue with their per-user status (v2, migration 012). */
@@ -124,6 +125,7 @@ export interface PMIssueLink {
   id: number
   targetPath: string
   kind: string // note | url | issue
+  relation?: string | null // v3: free-text relationship label ("blocks", "relates to", …)
   createdAt: string
 }
 
@@ -152,6 +154,8 @@ export interface PMIssueDetail {
   assignees: PMAssignee[]
   /** Linked notes/urls/issues (always present, possibly empty). */
   links: PMIssueLink[]
+  /** Department queues (v3 multi-dept; always present, possibly empty). */
+  departments?: string[]
   createdAt: string
   updatedAt: string
 }

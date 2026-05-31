@@ -4,6 +4,7 @@
 import { App, Modal, Notice, Setting } from 'obsidian'
 import { PMClient, PMError } from './api'
 import type {
+  PMActivityEntry,
   PMAnalytics,
   PMAssignee,
   PMComment,
@@ -12,7 +13,9 @@ import type {
   PMIssueDetail,
   PMIssueLink,
   PMLabel,
+  PMMember,
   PMMeta,
+  PMStatusMeta,
 } from './types'
 
 /** Markdown-file paths in the vault, for the link autocomplete + [[wikilink]]
@@ -199,63 +202,109 @@ export class IssueDetailModal extends Modal {
     return this.meta.statuses.find(s => s.key === key)?.name ?? key
   }
 
+  /** Workflow statuses in board order (sortOrder) — drives the status control. */
+  private orderedStatuses(): PMStatusMeta[] {
+    return [...this.meta.statuses].sort((a, b) => a.sortOrder - b.sortOrder)
+  }
+
   private renderIssue(issue: PMIssueDetail) {
     const { contentEl } = this
-    contentEl.createEl('h2', { text: `${issue.ref}` })
+    contentEl.addClass('nnn-pm-detail')
 
+    // Editable fields, shared with the footer Save button.
     let title = issue.title
     let description = issue.description
     let priority = issue.priority
 
-    new Setting(contentEl).setName('Title').addText(t => {
-      t.setValue(issue.title)
-      t.inputEl.style.width = '100%'
-      t.onChange(v => (title = v))
+    // ── Header: ref + priority chip, an at-a-glance summary grid, the status
+    //    control, and a shared error line. ──────────────────────────────────────
+    const header = contentEl.createDiv({ cls: 'nnn-pm-detail-header' })
+    const titleRow = header.createDiv({ cls: 'nnn-pm-detail-titlerow' })
+    titleRow.createEl('h2', { text: issue.ref, cls: 'nnn-pm-detail-ref' })
+    titleRow.createSpan({
+      cls: `nnn-pm-prio nnn-pm-prio-${issue.priority}`,
+      text: issue.priority,
     })
 
-    new Setting(contentEl).setName('Description').addTextArea(t => {
-      t.setValue(issue.description)
-      t.inputEl.style.width = '100%'
-      t.inputEl.rows = 5
-      t.onChange(v => (description = v))
-    })
+    const grid = header.createDiv({ cls: 'nnn-pm-summary-grid' })
+    const summaryCell = (k: string, v: string) => {
+      const c = grid.createDiv({ cls: 'nnn-pm-summary-cell' })
+      c.createDiv({ cls: 'nnn-pm-summary-key', text: k })
+      c.createDiv({ cls: 'nnn-pm-summary-val', text: v })
+    }
+    const aCount = (issue.assignees ?? []).length
+    summaryCell('Status', this.statusName(issue.status))
+    summaryCell('Assignees', aCount ? `${aCount} assigned` : 'Unassigned')
+    summaryCell('Dept queue', issue.assignedDepartment || '—')
+    summaryCell('Updated', new Date(issue.updatedAt).toLocaleDateString())
 
-    new Setting(contentEl).setName('Priority').addDropdown(d => {
-      for (const p of this.meta.priorities) d.addOption(p, p)
-      d.setValue(issue.priority)
-      d.onChange(v => (priority = v))
-    })
-
-    const errorEl = contentEl.createEl('p')
-    errorEl.style.color = 'var(--text-error, red)'
+    const errorEl = header.createEl('p', { cls: 'nnn-pm-error' })
     errorEl.style.minHeight = '1.2em'
 
-    // Transition buttons from the workflow graph for the current status.
-    const targets = this.meta.transitions[issue.status] ?? []
-    const tRow = contentEl.createDiv({ cls: 'nnn-pm-transitions' })
-    tRow.style.margin = '6px 0 12px 0'
-    tRow.createSpan({ text: `Status: ${this.statusName(issue.status)}` })
-    if (targets.length) {
-      tRow.createSpan({ text: '  →  ' })
-      for (const to of targets) {
-        const btn = tRow.createEl('button', { text: this.statusName(to) })
-        btn.style.marginRight = '6px'
-        btn.onclick = async () => {
-          btn.disabled = true
-          try {
-            await this.client.transition(issue.id, to)
-            new Notice(`Moved to ${this.statusName(to)}`)
-            this.dirty = true
-            this.close()
-          } catch (e) {
-            btn.disabled = false
-            errorEl.setText(errMsg(e))
-          }
-        }
+    this.renderStatusControl(header, issue, errorEl)
+
+    // ── Tab strip + panels ─────────────────────────────────────────────────────
+    const tabDefs: { id: string; label: string }[] = [
+      { id: 'details', label: 'Details' },
+      { id: 'people', label: 'Assignees & Links' },
+      { id: 'comments', label: 'Comments' },
+      { id: 'activity', label: 'Activity' },
+    ]
+    const strip = contentEl.createDiv({ cls: 'nnn-pm-tabstrip' })
+    const panelHost = contentEl.createDiv({ cls: 'nnn-pm-tabbody' })
+    const panels: Record<string, HTMLElement> = {}
+    const buttons: Record<string, HTMLButtonElement> = {}
+    const select = (id: string) => {
+      for (const d of tabDefs) {
+        buttons[d.id].toggleClass('nnn-pm-tab-on', d.id === id)
+        panels[d.id].toggleClass('nnn-pm-tab-active', d.id === id)
       }
     }
+    for (const d of tabDefs) {
+      const b = strip.createEl('button', { cls: 'nnn-pm-tab', text: d.label })
+      buttons[d.id] = b
+      panels[d.id] = panelHost.createDiv({ cls: 'nnn-pm-tabpanel' })
+      b.onclick = () => select(d.id)
+    }
 
-    new Setting(contentEl)
+    // Details tab: a 4-column field grid — section headers + field labels in
+    // column 1, controls spanning columns 2-4 — replacing the stacked Setting rows.
+    const det = panels.details
+    const detailGrid = det.createDiv({ cls: 'nnn-pm-fieldgrid' })
+    const section = (t: string) => detailGrid.createDiv({ cls: 'nnn-pm-fieldgrid-section', text: t })
+    const field = (label: string): HTMLElement => {
+      detailGrid.createDiv({ cls: 'nnn-pm-fieldgrid-label', text: label })
+      return detailGrid.createDiv({ cls: 'nnn-pm-fieldgrid-control' })
+    }
+
+    section('Issue')
+    const titleIn = field('Title').createEl('input', { type: 'text' })
+    titleIn.value = issue.title
+    titleIn.oninput = () => (title = titleIn.value)
+    const descTa = field('Description').createEl('textarea')
+    descTa.rows = 4
+    descTa.value = issue.description
+    descTa.oninput = () => (description = descTa.value)
+    const prioSel = field('Priority').createEl('select')
+    for (const p of this.meta.priorities) prioSel.createEl('option', { text: p }).value = p
+    prioSel.value = issue.priority
+    prioSel.onchange = () => (priority = prioSel.value)
+
+    section('Classification')
+    void this.renderTaxonomy(detailGrid, issue, field)
+
+    // Assignees & Links tab.
+    void this.renderAssignees(panels.people, issue)
+    void this.renderLinks(panels.people, issue)
+    void this.renderSubIssues(panels.people, issue)
+
+    // Comments + Activity tabs.
+    void this.renderComments(panels.comments, issue.id)
+    void this.renderActivity(panels.activity, issue.id)
+
+    // ── Footer: Save / Close (always visible, below the tab body) ──────────────
+    const footer = contentEl.createDiv({ cls: 'nnn-pm-detail-footer' })
+    new Setting(footer)
       .addButton(b =>
         b
           .setButtonText('Save')
@@ -279,26 +328,53 @@ export class IssueDetailModal extends Modal {
       )
       .addButton(b => b.setButtonText('Close').onClick(() => this.close()))
 
-    void this.renderDetails(contentEl, issue)
-    void this.renderComments(contentEl, issue.id)
-    void this.renderActivity(contentEl, issue.id)
+    select('details')
   }
 
-  // Layer-2 relations (migration 011): labels (chips + attach), epic, cycle, and
-  // parent. Each control mutates immediately via PATCH /pm/issues/:id (epic/cycle/
-  // parent) or the label attach/detach endpoints, and sets this.dirty so the board
-  // refreshes on close. Write-gating is server-enforced (a viewer's edit 403s and
-  // surfaces inline) — matching the existing Save/transition controls, which are
-  // likewise shown to everyone and rely on the backend's deny-by-default check.
-  private async renderDetails(parent: HTMLElement, issue: PMIssueDetail) {
-    const wrap = parent.createDiv({ cls: 'nnn-pm-details' })
-    wrap.createEl('h4', { text: 'Details' })
+  // Status control: a dropdown (native chevron) of the current status plus the
+  // workflow's allowed transitions for it. Selecting a target transitions the
+  // issue and closes (dirty) so the board reflects the move. Only legal targets
+  // appear — the workflow graph (/pm/meta) still gates what's offered.
+  private renderStatusControl(host: HTMLElement, issue: PMIssueDetail, errorEl: HTMLElement) {
+    const wrap = host.createDiv({ cls: 'nnn-pm-status-control' })
+    wrap.createSpan({ cls: 'nnn-pm-field-label', text: 'Status' })
+    const sel = wrap.createEl('select', { cls: 'nnn-pm-status-select' })
+    const cur = sel.createEl('option', { text: `${this.statusName(issue.status)} (current)` })
+    cur.value = issue.status
+    for (const to of this.meta.transitions[issue.status] ?? []) {
+      sel.createEl('option', { text: `→ ${this.statusName(to)}` }).value = to
+    }
+    sel.value = issue.status
+    sel.onchange = async () => {
+      const to = sel.value
+      if (to === issue.status) return
+      sel.disabled = true
+      try {
+        await this.client.transition(issue.id, to)
+        new Notice(`Moved to ${this.statusName(to)}`)
+        this.dirty = true
+        this.close()
+      } catch (e) {
+        sel.value = issue.status
+        sel.disabled = false
+        errorEl.setText(errMsg(e))
+      }
+    }
+  }
 
+  // Layer-2 + v2 taxonomy controls rendered into the shared Details field grid via
+  // `field(label)` (which returns the control cell spanning columns 2-4): labels,
+  // epic, cycle, parent, milestone, and the department queue. Each control mutates
+  // immediately via PATCH or the label endpoints and sets this.dirty so the board
+  // refreshes on close. Write-gating is server-enforced (a viewer's edit 403s).
+  private async renderTaxonomy(
+    grid: HTMLElement,
+    issue: PMIssueDetail,
+    field: (label: string) => HTMLElement,
+  ) {
     // ── Labels (chips + add) ──────────────────────────────────────────────────
-    const labelRow = wrap.createDiv({ cls: 'nnn-pm-detail-row' })
-    labelRow.createSpan({ cls: 'nnn-pm-detail-label', text: 'Labels' })
-    const chips = labelRow.createDiv({ cls: 'nnn-pm-chips' })
-
+    const labelCell = field('Labels')
+    const chips = labelCell.createDiv({ cls: 'nnn-pm-chips' })
     const repaintChips = (labels: PMLabel[]) => {
       chips.empty()
       if (!labels.length) {
@@ -324,8 +400,7 @@ export class IssueDetailModal extends Modal {
       }
     }
     repaintChips(issue.labels ?? [])
-
-    const addWrap = labelRow.createDiv({ cls: 'nnn-pm-chip-add' })
+    const addWrap = labelCell.createDiv({ cls: 'nnn-pm-chip-add' })
     const addSel = addWrap.createEl('select')
     addSel.createEl('option', { text: '— add label —' }).value = '0'
     const addBtn = addWrap.createEl('button', { text: '+ Label' })
@@ -348,12 +423,16 @@ export class IssueDetailModal extends Modal {
           o.value = String(l.id)
         }
       })
-      .catch(() => {
-        /* no project labels yet, or no permission to list — leave just the placeholder */
-      })
+      .catch(() => undefined)
 
-    // ── Epic / Cycle / Parent selects ─────────────────────────────────────────
-    const epicSel = this.detailSelect(wrap, 'Epic')
+    // ── Epic / Cycle / Parent / Milestone selects ─────────────────────────────
+    const selField = (label: string): HTMLSelectElement => {
+      const sel = field(label).createEl('select')
+      sel.createEl('option', { text: '— none —' }).value = '0'
+      return sel
+    }
+
+    const epicSel = selField('Epic')
     void this.client
       .epics(issue.projectKey)
       .then(eps => {
@@ -367,7 +446,7 @@ export class IssueDetailModal extends Modal {
     epicSel.onchange = () =>
       void this.patchRelation(issue, { epicId: Number(epicSel.value) }, 'Epic', epicSel, issue.epicId)
 
-    const cycleSel = this.detailSelect(wrap, 'Cycle')
+    const cycleSel = selField('Cycle')
     void this.client
       .cycles(issue.projectKey)
       .then(cs => {
@@ -382,7 +461,7 @@ export class IssueDetailModal extends Modal {
     cycleSel.onchange = () =>
       void this.patchRelation(issue, { cycleId: Number(cycleSel.value) }, 'Cycle', cycleSel, issue.cycleId)
 
-    const parentSel = this.detailSelect(wrap, 'Parent')
+    const parentSel = selField('Parent')
     void this.client
       .board(issue.projectKey)
       .then(board => {
@@ -395,16 +474,9 @@ export class IssueDetailModal extends Modal {
       })
       .catch(() => undefined)
     parentSel.onchange = () =>
-      void this.patchRelation(
-        issue,
-        { parentId: Number(parentSel.value) },
-        'Parent',
-        parentSel,
-        issue.parentId,
-      )
+      void this.patchRelation(issue, { parentId: Number(parentSel.value) }, 'Parent', parentSel, issue.parentId)
 
-    // ── Milestone select (v2) ─────────────────────────────────────────────────
-    const msSel = this.detailSelect(wrap, 'Milestone')
+    const msSel = selField('Milestone')
     void this.client
       .milestones(issue.projectKey)
       .then(ms => {
@@ -417,18 +489,10 @@ export class IssueDetailModal extends Modal {
       })
       .catch(() => undefined)
     msSel.onchange = () =>
-      void this.patchRelation(
-        issue,
-        { milestoneId: Number(msSel.value) },
-        'Milestone',
-        msSel,
-        issue.milestoneId,
-      )
+      void this.patchRelation(issue, { milestoneId: Number(msSel.value) }, 'Milestone', msSel, issue.milestoneId)
 
     // ── Department queue (v2): unclaimed work routed to a department ───────────
-    const deptRow = wrap.createDiv({ cls: 'nnn-pm-detail-row' })
-    deptRow.createSpan({ cls: 'nnn-pm-detail-label', text: 'Dept queue' })
-    const deptIn = deptRow.createEl('input', { type: 'text' })
+    const deptIn = field('Dept queue').createEl('input', { type: 'text' })
     deptIn.placeholder = 'e.g. engineering (blank = unqueued)'
     deptIn.value = issue.assignedDepartment ?? ''
     let deptPrev = issue.assignedDepartment ?? ''
@@ -445,15 +509,12 @@ export class IssueDetailModal extends Modal {
         new Notice(`NNN-PM: ${errMsg(e)}`)
       }
     }
+  }
 
-    // ── Assignees (multi-assignee + per-user status) ──────────────────────────
-    void this.renderAssignees(wrap, issue)
-
-    // ── Linked notes (v2: leverage that notes are files) ──────────────────────
-    void this.renderLinks(wrap, issue)
-
-    // ── Sub-issues (read-only list; click to open) ────────────────────────────
-    const subWrap = wrap.createDiv({ cls: 'nnn-pm-subissues' })
+  // Sub-issues (read-only list; click to open the child). Lives in the
+  // Assignees & Links tab alongside the linked-notes section.
+  private async renderSubIssues(parent: HTMLElement, issue: PMIssueDetail) {
+    const subWrap = parent.createDiv({ cls: 'nnn-pm-subissues' })
     subWrap.createEl('h4', { text: 'Sub-issues' })
     try {
       const kids = await this.client.children(issue.id)
@@ -581,14 +642,17 @@ export class IssueDetailModal extends Modal {
     void this.client
       .members(issue.projectKey)
       .then(ms => {
+        if (!ms.length) {
+          // No project members → nobody to assign. Point the user to Manage.
+          addSel.createEl('option', { text: '(no members — add in Manage)' }).disabled = true
+          return
+        }
         for (const m of ms) {
           const o = addSel.createEl('option', { text: `${m.username} (${m.role})` })
           o.value = String(m.userId)
         }
       })
-      .catch(() => {
-        /* no permission to list members, or none — leave just the placeholder */
-      })
+      .catch(() => undefined)
   }
 
   // ── Linked notes / urls (v2: "leverage that notes are files") ───────────────
@@ -743,24 +807,67 @@ export class IssueDetailModal extends Modal {
     }
   }
 
+  // Richer activity feed: each entry shows the actor, a humanized action phrase,
+  // a parsed detail line (field changes render as "from → to"), and the timestamp.
+  // The detail JSON shape is defensively handled — it's typed `unknown`.
   private async renderActivity(parent: HTMLElement, issueId: number) {
+    const wrap = parent.createDiv({ cls: 'nnn-pm-activity' })
+    wrap.createEl('h4', { text: 'Activity' })
+    const listEl = wrap.createDiv()
+    listEl.createEl('p', { text: 'Loading…', cls: 'nnn-pm-loading' })
     try {
       const items = await this.client.activity(issueId)
-      const wrap = parent.createDiv({ cls: 'nnn-pm-activity' })
-      wrap.createEl('h4', { text: 'Activity' })
+      listEl.empty()
       if (!items.length) {
-        wrap.createEl('p', { text: 'No activity yet.' })
+        listEl.createEl('p', { text: 'No activity yet.', cls: 'nnn-pm-loading' })
         return
       }
-      const ul = wrap.createEl('ul')
-      for (const a of items.slice(0, 20)) {
-        const when = new Date(a.createdAt).toLocaleString()
-        const who = a.actor ?? 'someone'
-        ul.createEl('li', { text: `${when} — ${who} ${a.action}` })
+      const feed = listEl.createEl('ul', { cls: 'nnn-pm-activity-feed' })
+      for (const a of items.slice(0, 50)) {
+        const li = feed.createEl('li', { cls: 'nnn-pm-activity-item' })
+        li.createSpan({ cls: 'nnn-pm-activity-dot' })
+        const main = li.createDiv({ cls: 'nnn-pm-activity-main' })
+        const line = main.createDiv({ cls: 'nnn-pm-activity-line' })
+        line.createSpan({ cls: 'nnn-pm-activity-actor', text: a.actor ?? 'someone' })
+        line.appendText(' ')
+        line.createSpan({ cls: 'nnn-pm-activity-action', text: this.activityPhrase(a) })
+        const detail = this.activityDetail(a)
+        if (detail) main.createDiv({ cls: 'nnn-pm-activity-detail', text: detail })
+        main.createDiv({
+          cls: 'nnn-pm-activity-when',
+          text: new Date(a.createdAt).toLocaleString(),
+        })
       }
     } catch {
       /* activity is best-effort — don't block the modal on it */
+      listEl.empty()
     }
+  }
+
+  /** Humanize a snake_case action verb ("status_changed" -> "status changed"). */
+  private activityPhrase(a: PMActivityEntry): string {
+    return a.action.replace(/_/g, ' ')
+  }
+
+  /** Format the activity detail JSON into one line. `from`/`to` shapes render as a
+   *  transition; everything else collapses to a compact "key: value" list. Never
+   *  throws — `detail` is typed `unknown` and may be anything (or absent). */
+  private activityDetail(a: PMActivityEntry): string {
+    const d = a.detail
+    if (!d || typeof d !== 'object') return ''
+    const o = d as Record<string, unknown>
+    if ('from' in o || 'to' in o) {
+      const f = o.from == null || o.from === '' ? '∅' : String(o.from)
+      const t = o.to == null || o.to === '' ? '∅' : String(o.to)
+      const field = 'field' in o && o.field != null ? `${String(o.field)}: ` : ''
+      return `${field}${f} → ${t}`
+    }
+    const parts: string[] = []
+    for (const [k, v] of Object.entries(o)) {
+      if (v == null || typeof v === 'object') continue
+      parts.push(`${k}: ${String(v)}`)
+    }
+    return parts.join(' · ')
   }
 
   onClose() {
@@ -794,30 +901,38 @@ export class ProjectManageModal extends Modal {
     contentEl.empty()
     contentEl.addClass('nnn-pm-manage')
     contentEl.createEl('h2', { text: `Manage · ${this.projectKey}` })
+    void this.renderMembers(contentEl.createDiv({ cls: 'nnn-pm-manage-section' }))
     void this.renderLabels(contentEl.createDiv({ cls: 'nnn-pm-manage-section' }))
     void this.renderEpics(contentEl.createDiv({ cls: 'nnn-pm-manage-section' }))
     void this.renderCycles(contentEl.createDiv({ cls: 'nnn-pm-manage-section' }))
     void this.renderMilestones(contentEl.createDiv({ cls: 'nnn-pm-manage-section' }))
   }
 
-  private async renderMilestones(sec: HTMLElement) {
+  // Project members (migration 009): who can access the board AND who can be
+  // assigned to issues — the assignee picker reads this list, so an empty roster
+  // is why "can't assign" happens. Add by username; remove by the × control.
+  // Server-gated to admin|lead (a viewer's add/remove 403s + surfaces a Notice).
+  private async renderMembers(sec: HTMLElement) {
     sec.empty()
-    sec.createEl('h3', { text: 'Milestones' })
+    sec.createEl('h3', { text: 'Members' })
+    sec.createEl('p', {
+      cls: 'nnn-pm-manage-meta',
+      text: 'Members can be assigned to issues. Add teammates by username.',
+    })
     const listEl = sec.createDiv()
     try {
-      const ms = await this.client.milestones(this.projectKey)
-      if (!ms.length) listEl.createEl('p', { text: 'No milestones yet.', cls: 'nnn-pm-loading' })
-      for (const m of ms) {
+      const members = await this.client.members(this.projectKey)
+      if (!members.length) listEl.createEl('p', { text: 'No members yet.', cls: 'nnn-pm-loading' })
+      for (const m of members) {
         const row = listEl.createDiv({ cls: 'nnn-pm-manage-row' })
-        row.createSpan({ cls: 'nnn-pm-manage-name', text: m.name })
-        const meta = m.dueOn ? `due ${m.dueOn} · ${m.status}` : m.status
-        row.createSpan({ cls: 'nnn-pm-manage-meta', text: meta })
+        row.createSpan({ cls: 'nnn-pm-manage-name', text: m.username })
+        row.createSpan({ cls: 'nnn-pm-manage-meta', text: m.role })
         const x = row.createSpan({ cls: 'nnn-pm-chip-x', text: '×' })
-        x.setAttribute('aria-label', `Delete ${m.name}`)
+        x.setAttribute('aria-label', `Remove ${m.username}`)
         x.onclick = async () => {
           try {
-            await this.client.deleteMilestone(this.projectKey, m.id)
-            void this.renderMilestones(sec)
+            await this.client.removeMember(this.projectKey, m.userId)
+            void this.renderMembers(sec)
           } catch (e) {
             new Notice(`NNN-PM: ${errMsg(e)}`)
           }
@@ -829,23 +944,124 @@ export class ProjectManageModal extends Modal {
 
     const form = sec.createDiv({ cls: 'nnn-pm-manage-form' })
     const nameIn = form.createEl('input', { type: 'text' })
+    nameIn.placeholder = 'username'
+    const roleSel = form.createEl('select')
+    for (const r of ['member', 'lead', 'viewer']) roleSel.createEl('option', { text: r }).value = r
+    const addBtn = form.createEl('button', { text: 'Add member' })
+    addBtn.onclick = async () => {
+      const username = nameIn.value.trim()
+      if (!username) return
+      addBtn.disabled = true
+      try {
+        await this.client.addMember(this.projectKey, { username, role: roleSel.value })
+        nameIn.value = ''
+        void this.renderMembers(sec)
+      } catch (e) {
+        new Notice(`NNN-PM: ${errMsg(e)}`)
+      } finally {
+        addBtn.disabled = false
+      }
+    }
+  }
+
+  private async renderMilestones(sec: HTMLElement) {
+    sec.empty()
+    sec.createEl('h3', { text: 'Milestones' })
+    sec.createEl('p', {
+      cls: 'nnn-pm-manage-meta',
+      text: 'A dated delivery target with a goal (definition of done). Status + goal edit inline.',
+    })
+    const listEl = sec.createDiv()
+    try {
+      const ms = await this.client.milestones(this.projectKey)
+      if (!ms.length) {
+        listEl.createEl('p', { text: 'No milestones yet.', cls: 'nnn-pm-loading' })
+      } else {
+        const table = listEl.createEl('table', { cls: 'nnn-pm-ms-table' })
+        const htr = table.createEl('thead').createEl('tr')
+        for (const h of ['Milestone', 'Status', 'Due', 'Goal', '']) htr.createEl('th', { text: h })
+        const tb = table.createEl('tbody')
+        for (const m of ms) {
+          const tr = tb.createEl('tr')
+          tr.createEl('td', { cls: 'nnn-pm-ms-name', text: m.name })
+
+          const stSel = tr.createEl('td').createEl('select', { cls: 'nnn-pm-ms-status' })
+          for (const s of ['open', 'done', 'cancelled']) stSel.createEl('option', { text: s }).value = s
+          stSel.value = m.status
+          stSel.onchange = () => void this.patchMilestone(sec, m.id, { status: stSel.value })
+
+          tr.createEl('td', { cls: 'nnn-pm-ms-due', text: m.dueOn ?? '—' })
+
+          const goalIn = tr.createEl('td').createEl('input', { type: 'text', cls: 'nnn-pm-ms-goal' })
+          goalIn.placeholder = 'set a goal…'
+          goalIn.value = m.goal ?? ''
+          let goalPrev = m.goal ?? ''
+          goalIn.onchange = () => {
+            const v = goalIn.value.trim()
+            if (v === goalPrev) return
+            goalPrev = v
+            void this.patchMilestone(sec, m.id, { goal: v }, false)
+          }
+
+          const x = tr.createEl('td').createSpan({ cls: 'nnn-pm-chip-x', text: '×' })
+          x.setAttribute('aria-label', `Delete ${m.name}`)
+          x.onclick = async () => {
+            try {
+              await this.client.deleteMilestone(this.projectKey, m.id)
+              void this.renderMilestones(sec)
+            } catch (e) {
+              new Notice(`NNN-PM: ${errMsg(e)}`)
+            }
+          }
+        }
+      }
+    } catch (e) {
+      listEl.createEl('p', { text: errMsg(e), cls: 'nnn-pm-error' })
+    }
+
+    const form = sec.createDiv({ cls: 'nnn-pm-manage-form' })
+    const nameIn = form.createEl('input', { type: 'text' })
     nameIn.placeholder = 'New milestone name'
     const dueIn = form.createEl('input', { type: 'date' })
+    const goalNew = form.createEl('input', { type: 'text' })
+    goalNew.placeholder = 'goal (optional)'
     const addBtn = form.createEl('button', { text: 'Add milestone' })
     addBtn.onclick = async () => {
       const name = nameIn.value.trim()
       if (!name) return
       addBtn.disabled = true
       try {
-        await this.client.createMilestone(this.projectKey, { name, dueOn: dueIn.value || null })
+        await this.client.createMilestone(this.projectKey, {
+          name,
+          dueOn: dueIn.value || null,
+          goal: goalNew.value.trim() || null,
+        })
         nameIn.value = ''
         dueIn.value = ''
+        goalNew.value = ''
         void this.renderMilestones(sec)
       } catch (e) {
         new Notice(`NNN-PM: ${errMsg(e)}`)
       } finally {
         addBtn.disabled = false
       }
+    }
+  }
+
+  // PATCH one milestone (status / goal / due / name). `repaint` redraws the table
+  // for structural edits; the inline goal input passes false so a mid-typing
+  // commit doesn't steal focus.
+  private async patchMilestone(
+    sec: HTMLElement,
+    id: number,
+    fields: { name?: string; dueOn?: string | null; status?: string; goal?: string | null },
+    repaint = true,
+  ) {
+    try {
+      await this.client.updateMilestone(this.projectKey, id, fields)
+      if (repaint) void this.renderMilestones(sec)
+    } catch (e) {
+      new Notice(`NNN-PM: ${errMsg(e)}`)
     }
   }
 

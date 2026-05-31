@@ -127,18 +127,8 @@ function paintBoard(
       exportBtn.disabled = false
     }
   }
-  const fcount = activeFilterCount(opts.filters)
-  const filterBtn = bar.createEl('button', {
-    text: fcount ? `⛃ Filters (${fcount})` : '⛃ Filters',
-  })
-  if (fcount) filterBtn.addClass('nnn-pm-filter-active')
-  filterBtn.onclick = () => {
-    opts.filtersOpen = !opts.filtersOpen
-    reload()
-  }
-
-  // Filter bar (only when expanded) — between the toolbar and the columns.
-  if (opts.filtersOpen) renderFilterBar(container, client, opts, meta, reload)
+  // Filter bar is permanent (always visible) — between the toolbar and the columns.
+  renderFilterBar(container, client, opts, meta, reload)
 
   // Columns
   const cols = container.createDiv({ cls: 'nnn-pm-columns' })

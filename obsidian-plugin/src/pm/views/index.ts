@@ -4,11 +4,17 @@
 
 import { pmViews } from '../registry'
 import { boardView } from './board'
+import { tableView } from './table'
+import { roadmapView } from './roadmap'
+import { dataView } from './data'
 
 let registered = false
 
 export function registerBuiltinViews(): void {
   if (registered) return // idempotent — plugin reloads call onload again
   pmViews.register(boardView)
+  pmViews.register(tableView)
+  pmViews.register(roadmapView)
+  pmViews.register(dataView)
   registered = true
 }
