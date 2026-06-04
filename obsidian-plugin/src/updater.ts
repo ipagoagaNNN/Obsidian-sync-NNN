@@ -3,6 +3,7 @@
 // fetch; the orchestration (checkForUpdate / performUpdate) lives on the plugin
 // class so it can write into the vault adapter.
 
+import { requestUrl } from 'obsidian'
 import { PLUGIN_REPO_OWNER, PLUGIN_REPO_NAME } from './version'
 
 /** Compare two dot-separated versions. Returns -1, 0, or 1. Treats "1.3.0" < "1.3.1" < "1.4". */
@@ -31,12 +32,17 @@ export async function sha256Hex(text: string): Promise<string> {
 export interface ReleaseAsset { name: string; browser_download_url: string }
 export interface ReleaseMeta  { tag_name: string; assets: ReleaseAsset[] }
 
-/** Fetch the latest release metadata from the pinned GitHub repo. */
+/** Fetch the latest release metadata from the pinned GitHub repo.
+ *  Uses Obsidian's requestUrl (main-process HTTP) rather than fetch() so it is
+ *  not subject to the renderer's CORS/CSP — the same reason performUpdate's
+ *  asset downloads use requestUrl (see main.ts). */
 export async function fetchLatestRelease(): Promise<ReleaseMeta> {
   const url = `https://api.github.com/repos/${PLUGIN_REPO_OWNER}/${PLUGIN_REPO_NAME}/releases/latest`
-  const res = await fetch(url, {
+  const res = await requestUrl({
+    url,
     headers: { 'User-Agent': 'NNN-Sync-Plugin', 'Accept': 'application/vnd.github+json' },
+    throw: false,
   })
-  if (!res.ok) throw new Error(`GitHub API ${res.status}`)
-  return await res.json() as ReleaseMeta
+  if (res.status < 200 || res.status >= 300) throw new Error(`GitHub API ${res.status}`)
+  return res.json as ReleaseMeta
 }

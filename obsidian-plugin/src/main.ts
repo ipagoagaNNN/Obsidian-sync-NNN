@@ -56,6 +56,7 @@ import {
   TAbstractFile,
   TFile,
   normalizePath,
+  requestUrl,
 } from 'obsidian'
 import * as Y from 'yjs'
 import { YSweetProvider } from '@y-sweet/client'
@@ -588,11 +589,15 @@ export default class NNNSyncPlugin extends Plugin {
       const grab = async (name: string) => {
         const asset = release.assets.find(a => a.name === name)
         if (!asset) throw new Error(`Release v${newVer} is missing asset '${name}'`)
-        const res = await fetch(asset.browser_download_url, {
-          headers: { 'User-Agent': 'NNN-Sync-Plugin' },
-        })
-        if (!res.ok) throw new Error(`Download ${name} failed: ${res.status}`)
-        return await res.text()
+        // Obsidian's requestUrl runs in the main process: it follows GitHub's
+        // cross-origin 302 (releases/download → release-assets.githubusercontent
+        // .com) and is NOT subject to the renderer CORS/CSP that makes a plain
+        // fetch() of release assets fail. This is the v1.7.1 updater fix.
+        const res = await requestUrl({ url: asset.browser_download_url, throw: false })
+        if (res.status < 200 || res.status >= 300) {
+          throw new Error(`Download ${name} failed: ${res.status}`)
+        }
+        return res.text
       }
 
       const [mainJs, manifestJson, sha256Sums] = await Promise.all([
