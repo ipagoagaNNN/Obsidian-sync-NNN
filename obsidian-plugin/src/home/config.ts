@@ -33,18 +33,21 @@ export function defaultHomeConfig(): HomeConfig {
  * callers can read AND mutate the live config, then persist via saveSettings().
  */
 export function ensureHomeConfig(settings: { home?: HomeConfig }): HomeConfig {
-  const cur = settings.home
   const d = defaultHomeConfig()
-  const cfg: HomeConfig = {
-    collections: Array.isArray(cur?.collections) ? cur!.collections : d.collections,
-    favorites: Array.isArray(cur?.favorites) ? cur!.favorites : d.favorites,
-    mru: Array.isArray(cur?.mru) ? cur!.mru : d.mru,
-    replaceNewTabs: typeof cur?.replaceNewTabs === 'boolean' ? cur!.replaceNewTabs : d.replaceNewTabs,
-    openOnStartup: typeof cur?.openOnStartup === 'boolean' ? cur!.openOnStartup : d.openOnStartup,
-    greeting: typeof cur?.greeting === 'string' ? cur!.greeting : undefined,
+  const cur = settings.home
+  if (!cur || typeof cur !== 'object') {
+    settings.home = d
+    return d
   }
-  settings.home = cfg
-  return cfg
+  // Mutate in place so the reference stays stable across calls — the settings
+  // tab and the HomeView both hold this object; reassigning would detach them.
+  if (!Array.isArray(cur.collections)) cur.collections = d.collections
+  if (!Array.isArray(cur.favorites)) cur.favorites = d.favorites
+  if (!Array.isArray(cur.mru)) cur.mru = d.mru
+  if (typeof cur.replaceNewTabs !== 'boolean') cur.replaceNewTabs = d.replaceNewTabs
+  if (typeof cur.openOnStartup !== 'boolean') cur.openOnStartup = d.openOnStartup
+  if (cur.greeting !== undefined && typeof cur.greeting !== 'string') cur.greeting = undefined
+  return cur
 }
 
 /** Push a viewed path to the front of the MRU list (dedup + cap). */

@@ -4,7 +4,7 @@
 // the floor the in-app updater compares against. The repo constants pin where
 // updates come from and MUST match install-windows.ps1 / install-macos.sh.
 
-export const PLUGIN_VERSION = '1.6.0'
+export const PLUGIN_VERSION = '1.7.0'
 
 // Pinned source for in-app updates (must match install-windows.ps1 / install-macos.sh).
 export const PLUGIN_REPO_OWNER = 'ipagoagaNNN'

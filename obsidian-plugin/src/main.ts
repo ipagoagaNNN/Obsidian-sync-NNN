@@ -64,7 +64,7 @@ import type { ClientToken } from '@y-sweet/sdk'
 import { PLUGIN_VERSION } from './version'
 import { DEFAULT_SETTINGS } from './types'
 import type { NNNSyncSettings, PathACL, Permission } from './types'
-import { isSyncable, ensureParentDirs } from './fsutil'
+import { isSyncable, ensureParentDirs, setPrivateRoots } from './fsutil'
 import { effectivePermission } from './acl'
 import { compareVersions, sha256Hex, fetchLatestRelease } from './updater'
 import { logout, fetchClientToken } from './auth/session'
@@ -77,6 +77,8 @@ import { injectPMStyles, removePMStyles } from './pm/styles'
 import { NotificationsModal } from './pm/notifications'
 import { HOME_VIEW_TYPE, HomeView } from './home/view'
 import { ensureHomeConfig, pushMru } from './home/config'
+import { SPACES_VIEW_TYPE, SpacesView } from './spaces/view'
+import { ensureSpacesConfig } from './spaces/config'
 
 // ── Plugin ────────────────────────────────────────────────────────────────────
 
@@ -202,6 +204,20 @@ export default class NNNSyncPlugin extends Plugin {
       else this.maybeReplaceEmptyLeaves()
     })
 
+    // ── Spaces (Phase 2) — Private vs. Organization navigator ─────────────────
+    // A left-dock view over the same vault: Organization (synced, ACL-filtered)
+    // + Private (local-only roots, excluded from sync via setPrivateRoots).
+    this.registerView(SPACES_VIEW_TYPE, (leaf) => new SpacesView(leaf, this))
+    this.addCommand({
+      id: 'nnn-open-spaces',
+      name: 'Open Spaces',
+      callback: () => { void this.openSpaces() },
+    })
+    this.addRibbonIcon('layers', 'NNN Spaces', () => { void this.openSpaces() })
+    this.app.workspace.onLayoutReady(() => {
+      if (ensureSpacesConfig(this.settings).openOnStartup) void this.openSpaces()
+    })
+
     if (this.settings.enabled && this.settings.username && this.settings.docId) {
       setTimeout(() => this.startSync(), 3000)
     }
@@ -233,6 +249,34 @@ export default class NNNSyncPlugin extends Plugin {
   private scheduleHomeSave() {
     if (this.homeSaveDebounce) clearTimeout(this.homeSaveDebounce)
     this.homeSaveDebounce = setTimeout(() => { void this.saveSettings() }, 1500)
+  }
+
+  /** Open (or reveal) the Spaces navigator in the left dock. */
+  async openSpaces() {
+    const { workspace } = this.app
+    const existing = workspace.getLeavesOfType(SPACES_VIEW_TYPE)[0]
+    const leaf = existing ?? workspace.getLeftLeaf(false) ?? workspace.getLeftLeaf(true)
+    if (!leaf) {
+      new Notice('NNN Spaces: no left panel available.')
+      return
+    }
+    if (!existing) await leaf.setViewState({ type: SPACES_VIEW_TYPE, active: true })
+    workspace.revealLeaf(leaf)
+  }
+
+  /** Re-apply private roots to the sync filter + re-render open Spaces views.
+   *  Called from the settings tab when the private-folder list changes. */
+  applyPrivateRoots() {
+    setPrivateRoots(ensureSpacesConfig(this.settings).privateRoots)
+    this.refreshSpaces()
+  }
+
+  /** Re-render any open Spaces sidebars (after a settings change). */
+  refreshSpaces() {
+    for (const leaf of this.app.workspace.getLeavesOfType(SPACES_VIEW_TYPE)) {
+      const v = leaf.view
+      if (v instanceof SpacesView) v.refresh()
+    }
   }
 
   /** Open the notifications inbox; refreshes the badge on any read-state change. */
@@ -368,6 +412,11 @@ export default class NNNSyncPlugin extends Plugin {
   /** Effective permission for a vault-relative file path. */
   private permissionFor(path: string): Permission {
     return effectivePermission(this.userRole, this.pathAcls, path)
+  }
+
+  /** Public ACL lookup for UI surfaces (the Spaces sidebar filters by this). */
+  permissionForPath(path: string): Permission {
+    return this.permissionFor(path)
   }
 
   // ── Manifest reporting (POST /vault/manifest, debounced) ────────────────
@@ -947,6 +996,9 @@ export default class NNNSyncPlugin extends Plugin {
     }
     // Normalize the home-tab config so live code always sees a full object.
     ensureHomeConfig(this.settings)
+    // Normalize Spaces config + apply private roots to the sync filter so
+    // local-only folders are excluded from sync from the very first connect.
+    setPrivateRoots(ensureSpacesConfig(this.settings).privateRoots)
   }
 
   async saveSettings() {

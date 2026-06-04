@@ -6,6 +6,7 @@ import type NNNSyncPlugin from './main'
 import { PLUGIN_VERSION } from './version'
 import { isSessionValid } from './auth/session'
 import { ensureHomeConfig } from './home/config'
+import { ensureSpacesConfig } from './spaces/config'
 
 export class NNNSyncSettingTab extends PluginSettingTab {
   plugin: NNNSyncPlugin
@@ -96,6 +97,7 @@ export class NNNSyncSettingTab extends PluginSettingTab {
         .onClick(() => this.plugin.stopSync()))
 
     this.renderHomeSection(containerEl)
+    this.renderSpacesSection(containerEl)
   }
 
   /** Home-tab preferences (Phase 1). Per-user, local-only. */
@@ -139,6 +141,51 @@ export class NNNSyncSettingTab extends PluginSettingTab {
       .addButton(btn => btn
         .setButtonText('Open Home')
         .onClick(() => { void this.plugin.openHome() }))
+  }
+
+  /** Spaces preferences (Phase 2). privateRoots feed the sync filter. */
+  private renderSpacesSection(containerEl: HTMLElement) {
+    const spaces = ensureSpacesConfig(this.plugin.settings)
+    containerEl.createEl('h3', { text: 'Spaces' })
+
+    new Setting(containerEl)
+      .setName('Private (local-only) folders')
+      .setDesc('Comma-separated folder paths kept on this device only and excluded from sync — files under these never leave your machine. Set these BEFORE putting sensitive notes there.')
+      .addText(text => text
+        .setPlaceholder('Private, Personal')
+        .setValue(spaces.privateRoots.join(', '))
+        .onChange(async (v) => {
+          spaces.privateRoots = v.split(',').map(s => s.trim()).filter(Boolean)
+          await this.plugin.saveSettings()
+          this.plugin.applyPrivateRoots()
+        }))
+
+    new Setting(containerEl)
+      .setName('Show dashboards in Organization')
+      .setDesc('Surface the project board + canonical docs at the top of the Organization space.')
+      .addToggle(t => t
+        .setValue(spaces.showDashboards)
+        .onChange(async (v) => {
+          spaces.showDashboards = v
+          await this.plugin.saveSettings()
+          this.plugin.refreshSpaces()
+        }))
+
+    new Setting(containerEl)
+      .setName('Open Spaces on startup')
+      .setDesc('Reveal the Spaces sidebar in the left dock when Obsidian launches.')
+      .addToggle(t => t
+        .setValue(spaces.openOnStartup)
+        .onChange(async (v) => {
+          spaces.openOnStartup = v
+          await this.plugin.saveSettings()
+        }))
+
+    new Setting(containerEl)
+      .setName('Open Spaces now')
+      .addButton(btn => btn
+        .setButtonText('Open Spaces')
+        .onClick(() => { void this.plugin.openSpaces() }))
   }
 
   /**

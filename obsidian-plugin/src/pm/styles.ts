@@ -794,6 +794,77 @@ const PM_CSS = `
 }
 .nnn-home-modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
 .nnn-home-modal-actions button { cursor: pointer; }
+
+/* ── Spaces sidebar (Phase 2) ─────────────────────────────────────────────────── */
+.nnn-spaces { display: flex; flex-direction: column; height: 100%; }
+.nnn-spaces-topbar {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 6px 8px 6px 12px; flex-shrink: 0;
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+.nnn-spaces-title { font-weight: 700; font-size: 0.95rem; color: var(--text-normal); }
+.nnn-spaces-iconbtn {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 24px; height: 24px; padding: 3px; border: none; cursor: pointer;
+  background: transparent; color: var(--text-muted); border-radius: var(--radius-s, 6px);
+}
+.nnn-spaces-iconbtn:hover { background: var(--background-modifier-hover); color: var(--text-normal); }
+.nnn-spaces-iconbtn svg { width: 15px; height: 15px; }
+.nnn-spaces-scroll { flex: 1; overflow-y: auto; padding: 6px 6px 30px; }
+
+.nnn-spaces-section { margin-bottom: 8px; }
+.nnn-spaces-section-head {
+  display: flex; align-items: center; gap: 5px; padding: 5px 6px; cursor: pointer;
+  border-radius: var(--radius-s, 6px); user-select: none;
+}
+.nnn-spaces-section-head:hover { background: var(--background-modifier-hover); }
+.nnn-spaces-section-icon { display: inline-flex; color: var(--text-muted); }
+.nnn-spaces-section-icon svg { width: 15px; height: 15px; }
+.nnn-spaces-section-title {
+  font-size: 0.72rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em;
+  color: var(--text-muted);
+}
+.nnn-spaces-section-badge {
+  margin-left: auto; font-size: 0.6rem; text-transform: uppercase; letter-spacing: 0.04em;
+  color: var(--text-faint); background: var(--background-modifier-border);
+  padding: 1px 6px; border-radius: 8px;
+}
+.nnn-spaces-section.is-collapsed .nnn-spaces-section-body { display: none; }
+
+.nnn-spaces-chevron { display: inline-flex; color: var(--text-faint); transition: transform 0.12s; }
+.nnn-spaces-chevron svg { width: 14px; height: 14px; }
+.nnn-spaces-section.is-collapsed .nnn-spaces-section-head .nnn-spaces-chevron,
+.nnn-spaces-folder.is-collapsed > .nnn-spaces-row > .nnn-spaces-chevron { transform: rotate(-90deg); }
+
+.nnn-spaces-hint { font-size: 0.72rem; color: var(--text-faint); padding: 3px 8px 5px; font-style: italic; }
+.nnn-spaces-empty { font-size: 0.78rem; color: var(--text-faint); padding: 4px 8px; }
+.nnn-spaces-subhead {
+  font-size: 0.64rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em;
+  color: var(--text-faint); padding: 4px 8px 2px;
+}
+.nnn-spaces-dash { margin-bottom: 4px; }
+
+.nnn-spaces-row {
+  display: flex; align-items: center; gap: 6px; padding: 3px 6px; cursor: pointer;
+  border-radius: var(--radius-s, 6px); min-width: 0;
+}
+.nnn-spaces-row:hover { background: var(--background-modifier-hover); }
+.nnn-spaces-row-icon { display: inline-flex; flex-shrink: 0; color: var(--text-muted); }
+.nnn-spaces-row-icon svg { width: 15px; height: 15px; }
+.nnn-spaces-row-label {
+  font-size: 0.84rem; color: var(--text-normal);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.nnn-spaces-folder-row .nnn-spaces-row-label { color: var(--text-muted); font-weight: 500; }
+.nnn-spaces-children {
+  margin-left: 14px; padding-left: 2px;
+  border-left: 1px solid var(--background-modifier-border);
+}
+.nnn-spaces-folder.is-collapsed > .nnn-spaces-children { display: none; }
+.nnn-spaces-badge {
+  margin-left: auto; flex-shrink: 0; font-size: 0.6rem; color: var(--text-faint);
+  background: var(--background-modifier-border); padding: 0 5px; border-radius: 6px;
+}
 `
 
 /** Inject the board stylesheet once (idempotent). */

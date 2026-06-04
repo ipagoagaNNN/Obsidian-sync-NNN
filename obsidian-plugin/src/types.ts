@@ -41,6 +41,19 @@ export interface HomeConfig {
   greeting?: string // optional custom heading shown at the top
 }
 
+// ── Spaces (Private vs. Organization, Phase 2) ────────────────────────────────
+
+/** Spaces configuration. Maps onto the existing sync + ACL machinery:
+ *  - privateRoots are excluded from sync (isSyncable → false) so they are
+ *    LOCAL-ONLY — the privacy guarantee is structural, not cosmetic.
+ *  - the Organization space = the synced subtree, surfaced read/write per the
+ *    server ACLs (effectivePermission). */
+export interface SpacesConfig {
+  privateRoots: string[] // local-only folder roots (never synced)
+  showDashboards: boolean // surface PM views + canonical docs atop the Org section
+  openOnStartup: boolean // reveal the Spaces sidebar when Obsidian launches
+}
+
 // ── ACL types (mirrors server's pathACL struct in types.go) ───────────────────
 
 /** Server-side ACL row. permission is "read" | "write" | "none" (raw DB value). */
@@ -77,6 +90,9 @@ export interface NNNSyncSettings {
   /** Home tab config (Phase 1). Optional on disk; normalized via
    *  ensureHomeConfig() on load so live code always sees a full object. */
   home?: HomeConfig
+  /** Spaces config (Phase 2). Optional on disk; normalized via
+   *  ensureSpacesConfig() on load. */
+  spaces?: SpacesConfig
 }
 
 export const DEFAULT_SETTINGS: NNNSyncSettings = {
