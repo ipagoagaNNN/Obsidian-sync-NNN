@@ -5,6 +5,7 @@ import { App, Modal, Notice, PluginSettingTab, Setting } from 'obsidian'
 import type NNNSyncPlugin from './main'
 import { PLUGIN_VERSION } from './version'
 import { isSessionValid } from './auth/session'
+import { ensureHomeConfig } from './home/config'
 
 export class NNNSyncSettingTab extends PluginSettingTab {
   plugin: NNNSyncPlugin
@@ -93,6 +94,51 @@ export class NNNSyncSettingTab extends PluginSettingTab {
       .addButton(btn => btn
         .setButtonText('Disconnect')
         .onClick(() => this.plugin.stopSync()))
+
+    this.renderHomeSection(containerEl)
+  }
+
+  /** Home-tab preferences (Phase 1). Per-user, local-only. */
+  private renderHomeSection(containerEl: HTMLElement) {
+    const home = ensureHomeConfig(this.plugin.settings)
+    containerEl.createEl('h3', { text: 'Home tab' })
+
+    new Setting(containerEl)
+      .setName('Replace new tabs with Home')
+      .setDesc('Turn empty/new tabs into your customizable Home view.')
+      .addToggle(t => t
+        .setValue(home.replaceNewTabs)
+        .onChange(async (v) => {
+          home.replaceNewTabs = v
+          await this.plugin.saveSettings()
+        }))
+
+    new Setting(containerEl)
+      .setName('Open Home on startup')
+      .setDesc('Show the Home view when Obsidian launches.')
+      .addToggle(t => t
+        .setValue(home.openOnStartup)
+        .onChange(async (v) => {
+          home.openOnStartup = v
+          await this.plugin.saveSettings()
+        }))
+
+    new Setting(containerEl)
+      .setName('Heading')
+      .setDesc('Custom title shown at the top of Home (leave blank for “Home”).')
+      .addText(text => text
+        .setPlaceholder('Home')
+        .setValue(home.greeting ?? '')
+        .onChange(async (v) => {
+          home.greeting = v.trim() || undefined
+          await this.plugin.saveSettings()
+        }))
+
+    new Setting(containerEl)
+      .setName('Open Home now')
+      .addButton(btn => btn
+        .setButtonText('Open Home')
+        .onClick(() => { void this.plugin.openHome() }))
   }
 
   /**

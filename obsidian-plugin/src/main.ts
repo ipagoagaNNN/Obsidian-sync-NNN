@@ -75,6 +75,8 @@ import { renderPMCodeBlock } from './pm/block'
 import { registerBuiltinViews } from './pm/views'
 import { injectPMStyles, removePMStyles } from './pm/styles'
 import { NotificationsModal } from './pm/notifications'
+import { HOME_VIEW_TYPE, HomeView } from './home/view'
+import { ensureHomeConfig, pushMru } from './home/config'
 
 // ── Plugin ────────────────────────────────────────────────────────────────────
 
@@ -108,6 +110,10 @@ export default class NNNSyncPlugin extends Plugin {
   // propagate to live clients without reconnect)
   private aclRefreshInterval: ReturnType<typeof setInterval> | null = null
   private reconcileInProgress = false
+
+  // Home tab — debounced settings save for the viewed-files MRU (file-open
+  // fires often; coalesce writes so we don't thrash saveData on every nav).
+  private homeSaveDebounce: ReturnType<typeof setTimeout> | null = null
 
   // In-app updater state (driven from the settings tab)
   latestVersion: string | null = null      // null = not checked, '' = check failed
@@ -167,9 +173,66 @@ export default class NNNSyncPlugin extends Plugin {
     this.registerInterval(window.setInterval(() => { void this.refreshPMNotifBadge() }, 60_000))
     setTimeout(() => { void this.refreshPMNotifBadge() }, 5000)
 
+    // ── Home tab (Phase 1) — customizable landing + new-tab experience ────────
+    // A custom ItemView that doubles as the new-tab view. Per-user config lives
+    // in settings.home (local only, never synced). Registered unconditionally;
+    // it works offline (vault search + recents) and lights up the notification
+    // bell when a PM session is active.
+    this.registerView(HOME_VIEW_TYPE, (leaf) => new HomeView(leaf, this))
+    this.addCommand({
+      id: 'nnn-open-home',
+      name: 'Open Home',
+      callback: () => { void this.openHome() },
+    })
+    this.addRibbonIcon('home', 'NNN Home', () => { void this.openHome() })
+
+    // Track viewed files for the "recently modified (viewed)" section.
+    this.registerEvent(this.app.workspace.on('file-open', (file) => {
+      if (!file) return
+      pushMru(ensureHomeConfig(this.settings), file.path)
+      this.scheduleHomeSave()
+    }))
+
+    // Turn empty/new tabs into Home (gated by the setting; safe — only acts on
+    // 'empty' leaves and the converted leaf is no longer 'empty', so no loop).
+    this.registerEvent(this.app.workspace.on('layout-change', () => this.maybeReplaceEmptyLeaves()))
+    this.app.workspace.onLayoutReady(() => {
+      const home = ensureHomeConfig(this.settings)
+      if (home.openOnStartup) void this.openHome(false)
+      else this.maybeReplaceEmptyLeaves()
+    })
+
     if (this.settings.enabled && this.settings.username && this.settings.docId) {
       setTimeout(() => this.startSync(), 3000)
     }
+  }
+
+  /** Open (or reveal) the Home view. Reuses an empty leaf when one exists so
+   *  startup doesn't spawn an extra tab. */
+  async openHome(preferNewTab = true) {
+    const { workspace } = this.app
+    let leaf = workspace.getLeavesOfType(HOME_VIEW_TYPE)[0]
+    if (!leaf) {
+      leaf =
+        workspace.getLeavesOfType('empty')[0] ??
+        (preferNewTab ? workspace.getLeaf('tab') : workspace.getLeaf(false))
+      await leaf.setViewState({ type: HOME_VIEW_TYPE, active: true })
+    }
+    workspace.revealLeaf(leaf)
+  }
+
+  /** Convert any empty leaves into Home when the setting is enabled. */
+  private maybeReplaceEmptyLeaves() {
+    if (!ensureHomeConfig(this.settings).replaceNewTabs) return
+    for (const leaf of this.app.workspace.getLeavesOfType('empty')) {
+      void leaf.setViewState({ type: HOME_VIEW_TYPE })
+    }
+  }
+
+  /** Debounced persist of the home config (MRU updates on every file-open). */
+  private scheduleHomeSave() {
+    if (this.homeSaveDebounce) clearTimeout(this.homeSaveDebounce)
+    this.homeSaveDebounce = setTimeout(() => { void this.saveSettings() }, 1500)
   }
 
   /** Open the notifications inbox; refreshes the badge on any read-state change. */
@@ -223,6 +286,10 @@ export default class NNNSyncPlugin extends Plugin {
 
   onunload() {
     removePMStyles()
+    if (this.homeSaveDebounce) {
+      clearTimeout(this.homeSaveDebounce)
+      this.homeSaveDebounce = null
+    }
     logout(this.settings)
     this.stopSync()
   }
@@ -878,6 +945,8 @@ export default class NNNSyncPlugin extends Plugin {
       this.settings.password = ''
       await this.saveSettings()
     }
+    // Normalize the home-tab config so live code always sees a full object.
+    ensureHomeConfig(this.settings)
   }
 
   async saveSettings() {

@@ -2,6 +2,45 @@
 
 import type { ClientToken } from '@y-sweet/sdk'
 
+// ── Home tab (workspace layer, Phase 1) ───────────────────────────────────────
+
+/** What a quick-link card points at.
+ *  note    → vault-relative note path (opened in the workspace)
+ *  folder  → vault-relative folder path (revealed in the file explorer)
+ *  url     → external URL (opened in the browser)
+ *  pmview  → an NNN-PM view (opens the PM board)
+ *  command → an Obsidian command id (executed) */
+export type HomeLinkKind = 'note' | 'folder' | 'url' | 'pmview' | 'command'
+
+/** One customizable quick-link card inside a collection. */
+export interface HomeLink {
+  id: string
+  label: string
+  icon?: string // lucide icon id (e.g. 'file-text'); falls back per-kind
+  color?: string // optional CSS accent color for the card
+  kind: HomeLinkKind
+  target: string // path | url | view id | command id (per kind)
+}
+
+/** A user-defined, personally-named group of quick-link cards. */
+export interface HomeCollection {
+  id: string
+  title: string
+  icon?: string
+  links: HomeLink[]
+}
+
+/** Per-user home-tab configuration. Persisted inside the plugin's settings
+ *  (loadData/saveData) — local to this device, never synced. */
+export interface HomeConfig {
+  collections: HomeCollection[]
+  favorites: string[] // vault-relative file paths (and/or urls)
+  mru: string[] // viewed-file paths, most-recent first (capped)
+  replaceNewTabs: boolean // turn empty/new tabs into the Home view
+  openOnStartup: boolean // open Home when Obsidian launches
+  greeting?: string // optional custom heading shown at the top
+}
+
 // ── ACL types (mirrors server's pathACL struct in types.go) ───────────────────
 
 /** Server-side ACL row. permission is "read" | "write" | "none" (raw DB value). */
@@ -35,6 +74,9 @@ export interface NNNSyncSettings {
   /** y-sweet logical doc ID — represents the entire shared vault */
   docId: string
   enabled: boolean
+  /** Home tab config (Phase 1). Optional on disk; normalized via
+   *  ensureHomeConfig() on load so live code always sees a full object. */
+  home?: HomeConfig
 }
 
 export const DEFAULT_SETTINGS: NNNSyncSettings = {

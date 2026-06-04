@@ -49,3 +49,10 @@ yarn-error.log*
 
 # ── Build artifacts in plugin dir (release workflow regenerates) ──────────────
 obsidian-plugin/SHA256SUMS
+
+# ── Tooling caches + local distributables ────────────────────────────────────
+# .mcp_cache/ is an editor/agent scratch dir; dist/ + *.zip are local sideload
+# bundles for manual tester installs (the release workflow attaches its own).
+.mcp_cache/
+dist/
+*.zip
