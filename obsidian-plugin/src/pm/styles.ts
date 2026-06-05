@@ -865,6 +865,40 @@ const PM_CSS = `
   margin-left: auto; flex-shrink: 0; font-size: 0.6rem; color: var(--text-faint);
   background: var(--background-modifier-border); padding: 0 5px; border-radius: 6px;
 }
+
+/* New note / new folder actions (Private space) */
+.nnn-spaces-actions { display: flex; gap: 6px; padding: 2px 6px 6px; }
+.nnn-spaces-newbtn {
+  display: inline-flex; align-items: center; gap: 4px; cursor: pointer;
+  font-size: 0.72rem; color: var(--text-muted); padding: 3px 8px;
+  border: 1px solid var(--background-modifier-border); border-radius: var(--radius-s, 6px);
+  background: var(--background-secondary);
+}
+.nnn-spaces-newbtn:hover { background: var(--background-modifier-hover); color: var(--text-normal); }
+.nnn-spaces-newbtn-icon { display: inline-flex; }
+.nnn-spaces-newbtn-icon svg { width: 13px; height: 13px; }
+
+/* Hover "+" to create a note inside a private folder */
+.nnn-spaces-row-add {
+  margin-left: auto; flex-shrink: 0; display: inline-flex; align-items: center;
+  color: var(--text-faint); opacity: 0; padding: 1px; border-radius: 4px;
+}
+.nnn-spaces-row-add svg { width: 14px; height: 14px; }
+.nnn-spaces-row:hover .nnn-spaces-row-add { opacity: 1; }
+.nnn-spaces-row-add:hover { color: var(--text-normal); background: var(--background-modifier-border); }
+
+/* Drag-to-reorder affordances */
+.nnn-spaces-row[draggable='true'] { -webkit-user-drag: element; }
+.nnn-spaces-row.is-dragging { opacity: 0.45; }
+.nnn-spaces-row.drop-before { box-shadow: inset 0 2px 0 0 var(--interactive-accent); }
+.nnn-spaces-row.drop-after { box-shadow: inset 0 -2px 0 0 var(--interactive-accent); }
+
+/* ── New-from-template modal (Phase 3) ────────────────────────────────────────── */
+.nnn-tmpl-modal h3 { margin-top: 0; }
+.nnn-tmpl-modal .nnn-tmpl-hint { color: var(--text-muted); font-size: 0.82rem; margin: 2px 0 6px; }
+.nnn-tmpl-modal hr { margin: 14px 0 8px; border: none; border-top: 1px solid var(--background-modifier-border); }
+.nnn-tmpl-modal .setting-item { border-top: none; padding: 6px 0; }
+.nnn-tmpl-modal textarea { min-height: 64px; width: 100%; }
 `
 
 /** Inject the board stylesheet once (idempotent). */

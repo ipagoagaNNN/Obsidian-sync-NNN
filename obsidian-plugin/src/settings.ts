@@ -7,6 +7,7 @@ import { PLUGIN_VERSION } from './version'
 import { isSessionValid } from './auth/session'
 import { ensureHomeConfig } from './home/config'
 import { ensureSpacesConfig } from './spaces/config'
+import { ensureTemplatesConfig } from './templates/config'
 
 export class NNNSyncSettingTab extends PluginSettingTab {
   plugin: NNNSyncPlugin
@@ -98,6 +99,7 @@ export class NNNSyncSettingTab extends PluginSettingTab {
 
     this.renderHomeSection(containerEl)
     this.renderSpacesSection(containerEl)
+    this.renderTemplatesSection(containerEl)
   }
 
   /** Home-tab preferences (Phase 1). Per-user, local-only. */
@@ -186,6 +188,48 @@ export class NNNSyncSettingTab extends PluginSettingTab {
       .addButton(btn => btn
         .setButtonText('Open Spaces')
         .onClick(() => { void this.plugin.openSpaces() }))
+  }
+
+  /** Templates preferences (Phase 3). Native New-from-template — no Templater. */
+  private renderTemplatesSection(containerEl: HTMLElement) {
+    const tmpl = ensureTemplatesConfig(this.plugin.settings)
+    containerEl.createEl('h3', { text: 'Templates' })
+
+    new Setting(containerEl)
+      .setName('Templates folder')
+      .setDesc('Folder that holds your template notes (each carries an nnn_schema block).')
+      .addText(text => text
+        .setPlaceholder('Templates')
+        .setValue(tmpl.templatesFolder)
+        .onChange(async (v) => {
+          tmpl.templatesFolder = v.trim() || 'Templates'
+          await this.plugin.saveSettings()
+        }))
+
+    new Setting(containerEl)
+      .setName('Default destination folder')
+      .setDesc('Where new notes are created when a template does not specify a target (blank = vault root).')
+      .addText(text => text
+        .setPlaceholder('(vault root)')
+        .setValue(tmpl.defaultDest)
+        .onChange(async (v) => {
+          tmpl.defaultDest = v.trim()
+          await this.plugin.saveSettings()
+        }))
+
+    new Setting(containerEl)
+      .setName('Starter templates + guide')
+      .setDesc('Create a ready-to-use set (Meeting note, Project doc, Task) plus a plain-language “How to use Templates” guide. Existing files are never overwritten.')
+      .addButton(btn => btn
+        .setButtonText('Create starter templates')
+        .onClick(async () => { await this.plugin.scaffoldTemplates() }))
+
+    new Setting(containerEl)
+      .setName('New from template now')
+      .addButton(btn => btn
+        .setButtonText('New from template')
+        .setCta()
+        .onClick(() => { void this.plugin.openNewFromTemplate() }))
   }
 
   /**

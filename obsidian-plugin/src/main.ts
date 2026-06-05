@@ -80,6 +80,11 @@ import { HOME_VIEW_TYPE, HomeView } from './home/view'
 import { ensureHomeConfig, pushMru } from './home/config'
 import { SPACES_VIEW_TYPE, SpacesView } from './spaces/view'
 import { ensureSpacesConfig } from './spaces/config'
+import { ensureTemplatesConfig } from './templates/config'
+import { listTemplates } from './templates/registry'
+import { createFromTemplate } from './templates/create'
+import { TemplateFormModal, TemplatePickModal } from './templates/modal'
+import { scaffoldStarterTemplates } from './templates/starter'
 
 // ── Plugin ────────────────────────────────────────────────────────────────────
 
@@ -219,6 +224,16 @@ export default class NNNSyncPlugin extends Plugin {
       if (ensureSpacesConfig(this.settings).openOnStartup) void this.openSpaces()
     })
 
+    // ── Templates (Phase 3) — native "New from template" (AGPL-free) ──────────
+    this.addCommand({
+      id: 'nnn-new-from-template',
+      name: 'New from template',
+      callback: () => { void this.openNewFromTemplate() },
+    })
+    this.addRibbonIcon('file-plus-2', 'NNN: New from template', () => {
+      void this.openNewFromTemplate()
+    })
+
     if (this.settings.enabled && this.settings.username && this.settings.docId) {
       setTimeout(() => this.startSync(), 3000)
     }
@@ -263,6 +278,53 @@ export default class NNNSyncPlugin extends Plugin {
     }
     if (!existing) await leaf.setViewState({ type: SPACES_VIEW_TYPE, active: true })
     workspace.revealLeaf(leaf)
+  }
+
+  // ── Templates (Phase 3) ─────────────────────────────────────────────────────
+
+  /** Run the New-from-template flow: pick a template, fill the form, create. */
+  async openNewFromTemplate() {
+    const cfg = ensureTemplatesConfig(this.settings)
+    const specs = await listTemplates(this.app, cfg.templatesFolder)
+    if (specs.length === 0) {
+      new Notice(
+        `No templates found in “${cfg.templatesFolder || '(vault root)'}”. ` +
+          `Create some from Settings → Templates → “Create starter templates”.`,
+      )
+      return
+    }
+    const run = (spec: typeof specs[number]) => {
+      new TemplateFormModal(this.app, spec, { defaultDest: cfg.defaultDest }, (req) => {
+        if (!req) return
+        void (async () => {
+          try {
+            const file = await createFromTemplate(
+              this.app,
+              spec,
+              req.values,
+              req.destFolder,
+              req.fileName,
+            )
+            await this.app.workspace.getLeaf(false).openFile(file)
+            new Notice(`Created ${file.basename}`)
+          } catch (err) {
+            new Notice(`Create failed: ${err instanceof Error ? err.message : String(err)}`)
+          }
+        })()
+      }).open()
+    }
+    if (specs.length === 1) run(specs[0])
+    else new TemplatePickModal(this.app, specs, run).open()
+  }
+
+  /** Scaffold the starter template library + user guide (Settings button). */
+  async scaffoldTemplates(): Promise<void> {
+    const cfg = ensureTemplatesConfig(this.settings)
+    const res = await scaffoldStarterTemplates(this.app, cfg.templatesFolder)
+    const parts: string[] = []
+    if (res.created.length) parts.push(`created ${res.created.length}`)
+    if (res.skipped.length) parts.push(`${res.skipped.length} already existed`)
+    new Notice(`Templates in “${cfg.templatesFolder}”: ${parts.join(', ') || 'nothing to do'}.`)
   }
 
   /** Re-apply private roots to the sync filter + re-render open Spaces views.
@@ -1004,6 +1066,8 @@ export default class NNNSyncPlugin extends Plugin {
     // Normalize Spaces config + apply private roots to the sync filter so
     // local-only folders are excluded from sync from the very first connect.
     setPrivateRoots(ensureSpacesConfig(this.settings).privateRoots)
+    // Normalize Templates config (Phase 3).
+    ensureTemplatesConfig(this.settings)
   }
 
   async saveSettings() {

@@ -10,6 +10,7 @@
 
 import {
   ItemView,
+  Notice,
   TAbstractFile,
   TFile,
   TFolder,
@@ -20,13 +21,22 @@ import type NNNSyncPlugin from '../main'
 import type { SpacesConfig } from '../types'
 import { ensureSpacesConfig } from './config'
 import { isPrivatePath } from '../fsutil'
+import { PromptModal } from '../home/modals'
 
 export const SPACES_VIEW_TYPE = 'nnn-spaces'
 
 const CANONICAL_NAMES = new Set(['Index', 'Dashboard', 'Status', 'Schema', 'Roadmap'])
 
+/** Strip characters Obsidian/Windows reject in a file or folder name. */
+function sanitizeName(raw: string): string {
+  return raw.replace(/[\\/:*?"<>|]/g, '').replace(/\s+/g, ' ').trim()
+}
+
 export class SpacesView extends ItemView {
   private refreshDebounce: ReturnType<typeof setTimeout> | null = null
+  /** In-flight drag: the dragged child's name + its parent folder path. A drop
+   *  is only honored when it lands on a sibling under the same parent. */
+  private dragState: { name: string; parentPath: string } | null = null
 
   constructor(
     leaf: WorkspaceLeaf,
@@ -47,6 +57,14 @@ export class SpacesView extends ItemView {
 
   private get cfg(): SpacesConfig {
     return ensureSpacesConfig(this.plugin.settings)
+  }
+
+  /** The manual-order map, guaranteed non-null (ensureSpacesConfig normalizes
+   *  it, but the field is optional on the on-disk type). */
+  private get orderMap(): Record<string, string[]> {
+    const c = this.cfg
+    if (!c.order) c.order = {}
+    return c.order
   }
 
   async onOpen() {
@@ -161,6 +179,19 @@ export class SpacesView extends ItemView {
 
   private renderPrivate(body: HTMLElement) {
     body.createDiv({ cls: 'nnn-spaces-hint', text: 'Local only — never synced.' })
+
+    // New-note / new-folder actions (create under the primary private root).
+    const primary = this.cfg.privateRoots[0] ?? ''
+    const actions = body.createDiv({ cls: 'nnn-spaces-actions' })
+    const mkBtn = (icon: string, label: string, onClick: () => void) => {
+      const b = actions.createEl('button', { cls: 'nnn-spaces-newbtn', attr: { title: label } })
+      setIcon(b.createSpan({ cls: 'nnn-spaces-newbtn-icon' }), icon)
+      b.createSpan({ text: label })
+      b.onclick = onClick
+    }
+    mkBtn('file-plus', 'New note', () => this.promptCreate('note', primary))
+    mkBtn('folder-plus', 'New folder', () => this.promptCreate('folder', primary))
+
     let any = false
     for (const root of this.cfg.privateRoots) {
       const folder = this.app.vault.getAbstractFileByPath(root)
@@ -175,7 +206,7 @@ export class SpacesView extends ItemView {
       const roots = this.cfg.privateRoots.join(', ') || '(none configured)'
       body.createDiv({
         cls: 'nnn-spaces-empty',
-        text: `No private notes yet. Create notes under: ${roots}`,
+        text: `No private notes yet. Use “New note” above (creates under: ${roots}).`,
       })
     }
   }
@@ -187,27 +218,50 @@ export class SpacesView extends ItemView {
       if (child instanceof TFolder) {
         if (aclFilter && isPrivatePath(child.path)) continue
         if (!this.folderHasVisible(child, aclFilter)) continue
-        this.renderFolderRow(parent, child, aclFilter)
+        this.renderFolderRow(parent, child, folder, aclFilter)
       } else if (child instanceof TFile) {
         if (!this.fileVisible(child, aclFilter)) continue
-        this.renderFileRow(parent, child, aclFilter)
+        this.renderFileRow(parent, child, folder, aclFilter)
       }
     }
   }
 
-  private renderFolderRow(parent: HTMLElement, folder: TFolder, aclFilter: boolean) {
+  private renderFolderRow(
+    parent: HTMLElement,
+    folder: TFolder,
+    parentFolder: TFolder,
+    aclFilter: boolean,
+  ) {
     const wrap = parent.createDiv({ cls: 'nnn-spaces-folder' })
     const row = wrap.createDiv({ cls: 'nnn-spaces-row nnn-spaces-folder-row' })
     const chev = row.createSpan({ cls: 'nnn-spaces-chevron' })
     setIcon(chev, 'chevron-down')
     setIcon(row.createSpan({ cls: 'nnn-spaces-row-icon' }), 'folder')
     row.createSpan({ cls: 'nnn-spaces-row-label', text: folder.name })
+    // Private folders get a hover "+" to create a note directly inside them.
+    if (!aclFilter) {
+      const add = row.createSpan({
+        cls: 'nnn-spaces-row-add',
+        attr: { 'aria-label': 'New note here', title: 'New note here' },
+      })
+      setIcon(add, 'plus')
+      add.onclick = (e) => {
+        e.stopPropagation()
+        this.promptCreate('note', folder.path)
+      }
+    }
     const children = wrap.createDiv({ cls: 'nnn-spaces-children' })
     this.renderTree(children, folder, aclFilter)
     row.onclick = () => wrap.toggleClass('is-collapsed', !wrap.hasClass('is-collapsed'))
+    this.attachDrag(row, folder, parentFolder)
   }
 
-  private renderFileRow(parent: HTMLElement, file: TFile, aclFilter: boolean) {
+  private renderFileRow(
+    parent: HTMLElement,
+    file: TFile,
+    parentFolder: TFolder,
+    aclFilter: boolean,
+  ) {
     const row = parent.createDiv({ cls: 'nnn-spaces-row nnn-spaces-file-row' })
     setIcon(row.createSpan({ cls: 'nnn-spaces-row-icon' }), 'file-text')
     row.createSpan({ cls: 'nnn-spaces-row-label', text: file.basename })
@@ -218,17 +272,152 @@ export class SpacesView extends ItemView {
     row.onclick = () => {
       void this.app.workspace.getLeaf(false).openFile(file)
     }
+    this.attachDrag(row, file, parentFolder)
   }
 
   // ── helpers ──────────────────────────────────────────────────────────────────
 
   private sortedChildren(folder: TFolder): TAbstractFile[] {
-    return folder.children.slice().sort((a, b) => {
+    // Default order: folders first, then alphabetical.
+    const def = folder.children.slice().sort((a, b) => {
       const af = a instanceof TFolder
       const bf = b instanceof TFolder
       if (af !== bf) return af ? -1 : 1
       return a.name.localeCompare(b.name)
     })
+    const ord = this.orderMap[folder.path]
+    if (!ord || ord.length === 0) return def
+    // Apply the saved manual order; unknown (new) children keep their default
+    // position via the stable sort (Array.sort is stable in the Electron VM).
+    const rank = (name: string) => {
+      const i = ord.indexOf(name)
+      return i === -1 ? Number.MAX_SAFE_INTEGER : i
+    }
+    return def.sort((a, b) => rank(a.name) - rank(b.name))
+  }
+
+  // ── drag-to-reorder ────────────────────────────────────────────────────────────
+
+  /** Make a tree row draggable + a drop target. Reorders are confined to
+   *  siblings under the SAME parent folder; the resulting order persists in
+   *  SpacesConfig.order keyed by the parent's path. */
+  private attachDrag(row: HTMLElement, child: TAbstractFile, parent: TFolder) {
+    row.setAttr('draggable', 'true')
+    row.addEventListener('dragstart', (e) => {
+      this.dragState = { name: child.name, parentPath: parent.path }
+      row.addClass('is-dragging')
+      e.dataTransfer?.setData('text/plain', child.path)
+      if (e.dataTransfer) e.dataTransfer.effectAllowed = 'move'
+    })
+    row.addEventListener('dragend', () => {
+      row.removeClass('is-dragging')
+      this.clearDropMarkers()
+      this.dragState = null
+    })
+    row.addEventListener('dragover', (e) => {
+      const ds = this.dragState
+      if (!ds || ds.parentPath !== parent.path || ds.name === child.name) return
+      e.preventDefault()
+      if (e.dataTransfer) e.dataTransfer.dropEffect = 'move'
+      row.removeClass('drop-before')
+      row.removeClass('drop-after')
+      row.addClass(this.isAfter(row, e) ? 'drop-after' : 'drop-before')
+    })
+    row.addEventListener('dragleave', () => {
+      row.removeClass('drop-before')
+      row.removeClass('drop-after')
+    })
+    row.addEventListener('drop', (e) => {
+      const ds = this.dragState
+      row.removeClass('drop-before')
+      row.removeClass('drop-after')
+      if (!ds || ds.parentPath !== parent.path || ds.name === child.name) return
+      e.preventDefault()
+      void this.reorder(parent, ds.name, child.name, this.isAfter(row, e))
+    })
+  }
+
+  private isAfter(row: HTMLElement, e: DragEvent): boolean {
+    const rect = row.getBoundingClientRect()
+    return e.clientY > rect.top + rect.height / 2
+  }
+
+  private clearDropMarkers() {
+    this.contentEl.querySelectorAll('.drop-before, .drop-after').forEach((el) => {
+      el.classList.remove('drop-before', 'drop-after')
+    })
+  }
+
+  /** Persist a new sibling order for `parent`, then re-render. */
+  private async reorder(parent: TFolder, dragged: string, target: string, after: boolean) {
+    const names = this.sortedChildren(parent).map((c) => c.name)
+    const from = names.indexOf(dragged)
+    if (from === -1) return
+    names.splice(from, 1)
+    let to = names.indexOf(target)
+    if (to === -1) return
+    if (after) to += 1
+    names.splice(to, 0, dragged)
+    this.orderMap[parent.path] = names
+    await this.plugin.saveSettings()
+    this.render()
+  }
+
+  // ── create note / folder (private space) ────────────────────────────────────────
+
+  private promptCreate(kind: 'note' | 'folder', parentPath: string) {
+    if (!parentPath) {
+      new Notice('No private root configured. Add one in Settings → Spaces.')
+      return
+    }
+    new PromptModal(
+      this.app,
+      {
+        title: kind === 'note' ? 'New private note' : 'New private folder',
+        placeholder: kind === 'note' ? 'Note name' : 'Folder name',
+        cta: 'Create',
+      },
+      (value) => {
+        if (value) void this.doCreate(kind, parentPath, value)
+      },
+    ).open()
+  }
+
+  private async doCreate(kind: 'note' | 'folder', parentPath: string, rawName: string) {
+    const name = sanitizeName(rawName)
+    if (!name) {
+      new Notice('Invalid name.')
+      return
+    }
+    try {
+      await this.ensureFolder(parentPath)
+      if (kind === 'folder') {
+        await this.app.vault.createFolder(`${parentPath}/${name}`)
+      } else {
+        const fileName = name.toLowerCase().endsWith('.md') ? name : `${name}.md`
+        const path = `${parentPath}/${fileName}`
+        if (this.app.vault.getAbstractFileByPath(path)) {
+          new Notice('A note with that name already exists.')
+          return
+        }
+        const file = await this.app.vault.create(path, '')
+        await this.app.workspace.getLeaf(false).openFile(file)
+      }
+      this.render()
+    } catch (err) {
+      new Notice(`Create failed: ${err instanceof Error ? err.message : String(err)}`)
+    }
+  }
+
+  /** Ensure a (possibly nested) folder path exists. */
+  private async ensureFolder(path: string) {
+    if (!path) return
+    if (this.app.vault.getAbstractFileByPath(path) instanceof TFolder) return
+    try {
+      await this.app.vault.createFolder(path)
+    } catch {
+      // already exists (race) — fine
+    }
   }
 
   private isTextFile(f: TFile): boolean {

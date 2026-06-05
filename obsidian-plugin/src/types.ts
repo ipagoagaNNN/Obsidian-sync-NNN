@@ -52,6 +52,23 @@ export interface SpacesConfig {
   privateRoots: string[] // local-only folder roots (never synced)
   showDashboards: boolean // surface PM views + canonical docs atop the Org section
   openOnStartup: boolean // reveal the Spaces sidebar when Obsidian launches
+  /**
+   * Manual sibling ordering, keyed by parent-folder path (vault root = '/').
+   * Value is the ordered list of child *names*; children not present fall to
+   * the end in the default (folders-first, alphabetical) order. Lets the user
+   * drag-reorder the tree — Obsidian itself only sorts alphabetically. Optional
+   * on disk; normalized to {} by ensureSpacesConfig().
+   */
+  order?: Record<string, string[]>
+}
+
+// ── Templates (native New-from-template, Phase 3) ─────────────────────────────
+
+/** Per-user template settings. Templates are plain notes carrying an
+ *  `nnn_schema` frontmatter block; no Templater dependency (clean-room, AGPL-safe). */
+export interface TemplatesConfig {
+  templatesFolder: string // where template notes live (default 'Templates')
+  defaultDest: string // default destination folder for created notes ('' = vault root)
 }
 
 // ── ACL types (mirrors server's pathACL struct in types.go) ───────────────────
@@ -93,6 +110,9 @@ export interface NNNSyncSettings {
   /** Spaces config (Phase 2). Optional on disk; normalized via
    *  ensureSpacesConfig() on load. */
   spaces?: SpacesConfig
+  /** Templates config (Phase 3). Optional on disk; normalized via
+   *  ensureTemplatesConfig() on load. */
+  templates?: TemplatesConfig
 }
 
 export const DEFAULT_SETTINGS: NNNSyncSettings = {

@@ -10,6 +10,7 @@ export function defaultSpacesConfig(): SpacesConfig {
     privateRoots: ['Private'],
     showDashboards: true,
     openOnStartup: false,
+    order: {},
   }
 }
 
@@ -37,5 +38,6 @@ export function ensureSpacesConfig(settings: { spaces?: SpacesConfig }): SpacesC
   else cur.privateRoots = cur.privateRoots.map(normalizeRoot).filter(Boolean)
   if (typeof cur.showDashboards !== 'boolean') cur.showDashboards = d.showDashboards
   if (typeof cur.openOnStartup !== 'boolean') cur.openOnStartup = d.openOnStartup
+  if (!cur.order || typeof cur.order !== 'object' || Array.isArray(cur.order)) cur.order = {}
   return cur
 }
